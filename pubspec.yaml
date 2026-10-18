@@ -43,6 +43,10 @@ dependencies:
   connectivity_plus: ^7.3.2
   sqflite_common_ffi: ^2.4.3
   flutter_dotenv: ^6.0.1
+  # Unicode NFC normalization. Mirrors Postgres `normalize(x, NFC)` so a donor
+  # name composed two different ways cannot become two donor identities.
+  # See lib/data/models/name_key.dart.
+  unorm_dart: ^0.3.0
 
 dev_dependencies:
   flutter_test:

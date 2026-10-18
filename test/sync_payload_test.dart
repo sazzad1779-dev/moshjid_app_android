@@ -137,6 +137,33 @@ void main() {
     });
   });
 
+  group('isHeldForDonor: members before transactions', () {
+    test('holds a transaction whose donor is not on the server yet', () {
+      expect(SyncService.isHeldForDonor(txnWith(memberId: 'local-uuid'),
+          donor(remoteId: null)),
+          isTrue);
+    });
+
+    test('lets a transaction through once the donor has a uuid', () {
+      expect(
+          SyncService.isHeldForDonor(txnWith(memberId: 'local-uuid'),
+              donor(remoteId: 'server-uuid')),
+          isFalse);
+    });
+
+    test('does not hold when the donor cannot be resolved at all', () {
+      // Nothing to wait for: pruneCloudProfiles never deletes a pending row, so
+      // a null donor means a bad local id and pushing beats stalling forever.
+      expect(SyncService.isHeldForDonor(txnWith(memberId: 'gone'), null),
+          isFalse);
+    });
+
+    test('does not hold a transaction with no member', () {
+      expect(SyncService.isHeldForDonor(txnWith(), donor(remoteId: null)),
+          isFalse);
+    });
+  });
+
   group('SyncResult', () {
     test('is quiet only when nothing happened and nothing failed', () {
       expect(const SyncResult().isQuiet, isTrue);
@@ -145,6 +172,12 @@ void main() {
       expect(const SyncResult(mergedProfiles: 1).isQuiet, isFalse);
       expect(const SyncResult(pulledProfiles: 5).isQuiet, isFalse);
       expect(const SyncResult(error: 'offline').isQuiet, isFalse);
+    });
+
+    test('deferred transactions stay quiet so the timer does not nag', () {
+      // A member that cannot push holds its transactions every cycle. That is
+      // not newsworthy; the pending badge already reports the backlog.
+      expect(const SyncResult(deferred: 3).isQuiet, isTrue);
     });
   });
 }

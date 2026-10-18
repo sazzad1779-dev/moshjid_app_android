@@ -147,7 +147,7 @@ class LocalDb {
         phone_key TEXT,
         match_key TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'member',
-        status TEXT NOT NULL DEFAULT 'approved',
+        status TEXT NOT NULL DEFAULT 'active',
         is_monthly INTEGER NOT NULL DEFAULT 1,
         source TEXT NOT NULL,
         client_created_at TEXT NOT NULL,

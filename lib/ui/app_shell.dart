@@ -106,6 +106,9 @@ class _AppShellState extends State<AppShell> {
     }
     if (r.pushed > 0) bits.add('${r.pushed} transaction(s)');
     if (r.failed > 0) bits.add('${r.failed} failed');
+    if (r.deferred > 0) {
+      bits.add('${r.deferred} waiting on their member to sync');
+    }
 
     if (r.error != null && r.pushed == 0 && r.failed == 0 && bits.isEmpty) {
       return r.error!;

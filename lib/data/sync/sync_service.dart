@@ -14,6 +14,10 @@ class SyncResult {
   final int mergedProfiles;
   final int pushed;
   final int failed;
+
+  /// Transactions left behind because their member is not on the server yet.
+  /// Not a failure: they go up on the next sync, once the member lands.
+  final int deferred;
   final String? error;
 
   const SyncResult({
@@ -23,10 +27,16 @@ class SyncResult {
     this.mergedProfiles = 0,
     this.pushed = 0,
     this.failed = 0,
+    this.deferred = 0,
     this.error,
   });
 
   /// True when there was genuinely nothing to do, as opposed to a failure.
+  ///
+  /// [deferred] counts as quiet on purpose. A member that cannot be pushed
+  /// holds its transactions every single cycle, and surfacing that from the
+  /// five-minute timer would mean the same message forever. The pending badge
+  /// already says how many are waiting.
   bool get isQuiet =>
       error == null &&
       pushed == 0 &&
@@ -115,7 +125,11 @@ class SyncService {
       mergedProfiles: donorPush.$2,
       pushed: txnPush.pushed,
       failed: txnPush.failed,
-      error: txnPush.error,
+      deferred: txnPush.deferred,
+      // A member push failure is the more fundamental one: it also causes
+      // transactions to be held back, so report it ahead of the transaction
+      // error rather than losing it.
+      error: donorPush.$3 ?? txnPush.error,
     );
   }
 
@@ -218,15 +232,21 @@ class SyncService {
   ///
   /// Ordered oldest first so that when several devices have been offline with
   /// the same new donor, the earliest spelling is the one that survives.
-  Future<(int, int)> pushProfiles() async {
+  ///
+  /// Returns `(created, merged, error)`. The third element is non-null when a
+  /// push failed for a reason a retry cannot fix -- RLS or auth. Reporting it
+  /// matters: without it a collector whose device cannot write `profiles` sees
+  /// donors sit on "waiting to sync" forever with every other signal green.
+  Future<(int, int, String?)> pushProfiles() async {
     final client = _client;
-    if (client == null) return (0, 0);
+    if (client == null) return (0, 0, null);
 
     final pending = await local.pendingProfiles();
-    if (pending.isEmpty) return (0, 0);
+    if (pending.isEmpty) return (0, 0, null);
 
     var created = 0;
     var merged = 0;
+    String? fatal;
     for (final p in pending) {
       try {
         final matchKey = p.matchKey;
@@ -270,12 +290,17 @@ class SyncService {
             await local.markProfileSynced(id: p.id, remoteId: winner);
             merged++;
           }
+        } else if (_isFatal(e) && fatal == null) {
+          // RLS or auth. Retrying cannot help and will not report anything, so
+          // surface it once and stop hammering the server.
+          fatal = e.toString();
+          break;
         }
-        // Anything else (RLS, auth, connectivity) leaves the donor pending and
+        // Anything else (connectivity, transient) leaves the donor pending and
         // it is retried on the next sync.
       }
     }
-    return (created, merged);
+    return (created, merged, fatal);
   }
 
   /// Finds the server uuid for a donor identity, or null when the server has
@@ -327,6 +352,25 @@ class SyncService {
     return payload;
   }
 
+  /// Whether [t] must wait for its donor to reach the server first.
+  ///
+  /// This is the invariant the whole ordering exists to protect, and it is not
+  /// enough for [pushProfiles] to simply run first: that method reports
+  /// completion even when every donor failed, because a failed push is
+  /// indistinguishable from "nothing pending" in its return value. Without this
+  /// check a transaction would go up with `member_id` omitted -- [buildPayload]
+  /// strips the key rather than sending null -- get marked synced, and never be
+  /// looked at again. The server would hold a member-less transaction
+  /// permanently.
+  ///
+  /// A missing donor is deliberately *not* held. There is nothing to wait for:
+  /// [LocalDb.pruneCloudProfiles] only ever deletes rows that already carry a
+  /// remote id, so a locally created donor cannot vanish underneath us. A null
+  /// donor therefore means a local id that never resolved, and holding forever
+  /// would just strand the transaction instead of pushing it without a link.
+  static bool isHeldForDonor(Txn t, Profile? donor) =>
+      t.memberId != null && donor != null && donor.remoteId == null;
+
   /// Pushes pending transactions. Donors must already be pushed.
   Future<SyncResult> pushPending() async {
     final client = _client;
@@ -336,7 +380,7 @@ class SyncService {
     final pending = await local.pendingTxns();
     if (pending.isEmpty) return const SyncResult();
 
-    int ok = 0, fail = 0;
+    int ok = 0, fail = 0, held = 0;
     String? lastError;
     for (final t in pending) {
       try {
@@ -346,6 +390,13 @@ class SyncService {
         Profile? donor;
         if (t.memberId != null) {
           donor = await local.findProfileById(t.memberId!);
+        }
+
+        // The donor did not make it up this round. Leave `synced_at` alone so
+        // the row stays in the queue and goes up right after the member lands.
+        if (isHeldForDonor(t, donor)) {
+          held++;
+          continue;
         }
 
         // Upsert (not insert): covers new rows, edited rows, and
@@ -363,7 +414,12 @@ class SyncService {
         if (_isFatal(e)) break;
       }
     }
-    return SyncResult(pushed: ok, failed: fail, error: lastError);
+    return SyncResult(
+        pushed: ok,
+        failed: fail,
+        deferred: held,
+        error: lastError,
+      );
   }
 
   /// Errors that will not fix themselves on a retry, so the queue should wait

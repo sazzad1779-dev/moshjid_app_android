@@ -58,11 +58,19 @@ class Profile {
   static const collectorRole = 'collector';
   static const adminRole = 'admin';
 
-  /// `profiles.status` in the schema. `link_donor_profiles.py` writes
-  /// `status = 'active'` while `approval_status = 'approved'`; both columns
-  /// exist server-side and this app only reads `status`.
+  /// `profiles.status`, whose Postgres enum `user_status` holds exactly
+  /// `active`, `inactive`, `suspended`.
+  ///
+  /// There is deliberately no "approved" member of that enum. `approved` is a
+  /// value of the *separate* `approval_status` column, and conflating the two
+  /// makes every donor this app creates fail to upload with
+  /// `22P02 invalid input value for enum user_status: "approved"`.
   static const activeStatus = 'active';
-  static const approvedStatus = 'approved';
+
+  /// The status a normally-active member carries. Named for the intent rather
+  /// than the wire value so callers can keep reading naturally; the string sent
+  /// to Postgres is [activeStatus].
+  static const approvedStatus = activeStatus;
 
   /// Locally created, not yet on the server.
   static const localSource = 'local';
@@ -70,7 +78,13 @@ class Profile {
   /// Came down from the server in a pull.
   static const cloudSource = 'cloud';
 
-  bool get isPending => syncedAt == null || remoteId == null;
+  /// Whether this donor still needs pushing.
+  ///
+  /// Deliberately `remoteId == null` and nothing else, because that is exactly
+  /// what `LocalDb.pendingProfiles` queues on. Testing `syncedAt` as well let a
+  /// row that had a uuid but a null timestamp render as "Waiting to sync" and
+  /// sit in the nav badge forever, while no sync would ever pick it up.
+  bool get isPending => remoteId == null;
   bool get isMember => role == memberRole;
 
   /// Identity per [NameKey]. Must match `profiles.match_key` exactly.
@@ -236,13 +250,25 @@ class Profile {
       'full_name': fullName,
       'phone': phone,
       'role': role,
-      'status': status,
+      'status': pushStatus,
       'is_monthly': isMonthly,
       'client_created_at': clientCreatedAt.toUtc().toIso8601String(),
       'created_at': now,
       'updated_at': now,
     };
   }
+
+  /// The status to send to Postgres.
+  ///
+  /// `user_status` only accepts active/inactive/suspended, and any other string
+  /// fails the whole upsert with `22P02`. Devices that created donors before
+  /// that was noticed still have `approved` sitting in `profiles_cache`, and
+  /// there is no schema migration to rewrite it -- so coerce here rather than
+  /// leave those donors stuck in the queue forever. A donor we created is
+  /// active by definition; nothing in the collection flow sets the others.
+  String get pushStatus => const {'active', 'inactive', 'suspended'}.contains(status)
+      ? status
+      : activeStatus;
 
   /// The uuid to use as `profiles.id` when pushing.
   ///

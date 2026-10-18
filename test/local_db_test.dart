@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:moshjid_app/data/local/local_db.dart';
 import 'package:moshjid_app/data/models/profile.dart';
 import 'package:moshjid_app/data/models/txn.dart';
+import 'package:moshjid_app/data/sync/sync_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 /// These exercise the offline half of the donor rules. The server half lives in
@@ -274,6 +275,38 @@ void main() {
         expect(after!.remoteId, 'server-uuid');
         expect(after.id, p.id);
         expect(await db.pendingProfileCount(), 0);
+      });
+    });
+
+    test('a held transaction stays queued and still counts as pending', () async {
+      await LocalDb.withTempDb((db) async {
+        // The state pushPending leaves a transaction in when its donor cannot
+        // be pushed. Nothing may retire it or the queue loses it silently.
+        final donor = await db.ensureProfile(fullName: 'Roxi');
+        final t = Txn.create(
+          type: 'income',
+          category: 'Imam Hadiya',
+          amount: 300,
+          paymentMethod: 'cash',
+          enteredBy: 'op-1',
+          memberId: donor.id,
+        );
+        await db.insertTxn(t);
+
+        expect(SyncService.isHeldForDonor(t, donor), isTrue,
+            reason: 'donor has no remoteId yet');
+
+        final stillPending = await db.pendingTxns();
+        expect(stillPending.map((x) => x.id), contains(t.id));
+        expect(await db.pendingCount(), 1);
+        expect(stillPending.single.isSynced, isFalse);
+
+        // Once the member lands the hold lifts and the row is pushable.
+        await db.markProfileSynced(id: donor.id, remoteId: 'server-uuid');
+        final after = await db.findProfileById(donor.id);
+        expect(SyncService.isHeldForDonor(t, after), isFalse);
+        expect(await db.pendingCount(), 1,
+            reason: 'the transaction itself is untouched until it is pushed');
       });
     });
 
