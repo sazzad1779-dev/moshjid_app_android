@@ -186,14 +186,15 @@ class SyncService {
 
   /// Reads the whole roster, preferring the lean column list.
   ///
-  /// Falls back to `*` when `phone` or `is_monthly` do not exist yet, which is
-  /// the case until `tools/donor_dedupe.sql` has been run. Without this a
-  /// missing migration would take the entire donor picker down rather than
-  /// just the phone numbers.
+  /// Falls back to `*` when `phone`, `is_monthly` or `is_deleted` do not exist
+  /// yet, which is the case until `tools/donor_dedupe.sql` and
+  /// `tools/member_lifecycle.sql` have been run. Without this a missing
+  /// migration would take the entire donor picker down rather than just the
+  /// phone numbers.
   Future<List<Map<String, dynamic>>> _selectAllProfiles(
       SupabaseClient client) async {
     const lean =
-        'id,full_name,phone,role,status,is_monthly,client_created_at,created_at';
+        'id,full_name,phone,role,status,is_monthly,is_deleted,client_created_at,created_at';
     try {
       return await _paged(
           (from, to) => client.from('profiles').select(lean).range(from, to),
@@ -217,6 +218,74 @@ class SyncService {
       if (chunk.length < _pageSize) break;
     }
     return all;
+  }
+
+  /// Columns that a partially migrated server may not have yet.
+  ///
+  /// Ordered newest migration last, so each retry drops exactly the column that
+  /// was rejected. A device whose app is newer than its database -- the normal
+  /// state between a release and someone running the SQL -- still collects and
+  /// uploads donors, minus the fields the server cannot accept. Without this
+  /// the whole upsert fails on one unknown column and the donor is stranded.
+  static const _optionalProfileCols = [
+    'phone',
+    'is_monthly',
+    'client_created_at',
+    'is_deleted',
+  ];
+
+  /// True when [e] means the server does not have a column we asked to send.
+  ///
+  /// Two different codes, and missing either one is a silent total failure:
+  /// PostgREST checks the column against its schema cache *before* the statement
+  /// reaches Postgres, so an absent column usually never arrives as `42703` at
+  /// all. It comes back as `PGRST204` naming the column in plain English.
+  static bool _isMissingColumn(PostgrestException e) =>
+      e.code == '42703' || e.code == 'PGRST204';
+
+  /// The column a missing-column error names, or null if it names something else.
+  ///
+  /// Postgres reports one missing column at a time (`column profiles.is_deleted
+  /// does not exist`) even when several are absent, so the name has to be read
+  /// off the error. Dropping columns in a fixed order instead would throw away
+  /// fields the server is perfectly happy to accept -- a donor would upload
+  /// without their phone number and nobody would notice.
+  static String? _missingColumn(String message) {
+    final postgrest = RegExp(r"Could not find the '([A-Za-z_]\w*)' column")
+        .firstMatch(message);
+    if (postgrest != null) return postgrest.group(1);
+    final postgres =
+        RegExp(r"column\s+(?:[A-Za-z_][\w]*\.)?'?([A-Za-z_]\w*)'?\s+does not exist")
+            .firstMatch(message);
+    return postgres?.group(1);
+  }
+
+  /// Upserts one donor, shedding optional columns the server rejects.
+  ///
+  /// A permission or auth error is never swallowed here; only a genuinely
+  /// missing column triggers a retry, and only that column is removed.
+  Future<void> _upsertProfile(SupabaseClient client, Profile p) async {
+    var payload = p.toSupabaseMap();
+    for (var attempt = 0; attempt <= _optionalProfileCols.length; attempt++) {
+      try {
+        await client.from('profiles').upsert(payload, onConflict: 'id');
+        return;
+      } on PostgrestException catch (e) {
+        if (!_isMissingColumn(e)) rethrow;
+        final col = _missingColumn(e.message);
+        // Only ever shed a column we were going to send anyway. Anything else
+        // -- a required column, an unrecognised message -- is a real failure and
+        // belongs to the caller's handler.
+        if (col == null ||
+            col == 'id' ||
+            !_optionalProfileCols.contains(col) ||
+            !payload.containsKey(col)) {
+          rethrow;
+        }
+        payload = Map<String, dynamic>.of(payload)..remove(col);
+      }
+    }
+    await client.from('profiles').upsert(payload, onConflict: 'id');
   }
 
   /// Pushes donors this device created offline.
@@ -251,6 +320,26 @@ class SyncService {
       try {
         final matchKey = p.matchKey;
 
+        // An edit is already on the server under its own uuid, so it updates
+        // that row in place. Deliberately skips the match_key lookup below:
+        // asking "does anyone else have this identity?" and adopting their id
+        // would re-point this donor at a stranger's row while the row we
+        // actually edited sits on the server under a stale name.
+        //
+        // If the new identity genuinely collides with another donor, the
+        // UNIQUE index raises and the catch block folds them together, which is
+        // the same outcome as two devices racing on a new donor.
+        if (p.remoteId != null) {
+          await _upsertProfile(client, p);
+          await local.markProfileSynced(id: p.id, remoteId: p.remoteId!);
+          if (p.isDeleted) {
+            merged++;
+          } else {
+            created++;
+          }
+          continue;
+        }
+
         // Ask first. This is the common case once another device or the Excel
         // import has already registered the donor.
         final existing =
@@ -263,8 +352,7 @@ class SyncService {
 
         // Upsert rather than insert so that a lost response on a previous
         // attempt is retried into the same row instead of colliding.
-        await client.from('profiles').upsert(p.toSupabaseMap(),
-            onConflict: 'id');
+        await _upsertProfile(client, p);
 
         // Read back rather than assuming. The upsert reports success either
         // way, and when `profiles_first_wins` skips the row the server never
@@ -370,6 +458,44 @@ class SyncService {
   /// would just strand the transaction instead of pushing it without a link.
   static bool isHeldForDonor(Txn t, Profile? donor) =>
       t.memberId != null && donor != null && donor.remoteId == null;
+
+  /// Pulls transactions from the cloud (Supabase).
+  ///
+  /// Optional date range filtering. Returns transactions with joined category
+  /// and donor info. When offline or not configured, returns null.
+  Future<List<Map<String, dynamic>>?> pullTransactions({
+    DateTime? startDate,
+    DateTime? endDate,
+  }) async {
+    final client = _client;
+    if (client == null) return null;
+    if (client.auth.currentUser == null) {
+      final ok = await AuthService().ensureSignedIn();
+      if (!ok) return null;
+    }
+    if (!await isOnline) return null;
+
+    try {
+      var query = client
+          .from('transactions')
+          .select(
+              'id, category_id, amount, payment_method, status, description, receipt_number, date, entered_by, member_id, donor_name, donor_phone, created_at, updated_at, is_deleted, transaction_categories!inner(id, name, type)');
+
+      if (startDate != null) {
+        query = query.gte('date', startDate.toIso8601String().split('T')[0]) as dynamic;
+      }
+      if (endDate != null) {
+        query = query.lte('date', endDate.toIso8601String().split('T')[0]) as dynamic;
+      }
+
+      query = query.order('date', ascending: false).order('created_at', ascending: false) as dynamic;
+
+      final rows = await query.limit(1000);
+      return (rows as List).cast<Map<String, dynamic>>();
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Pushes pending transactions. Donors must already be pushed.
   Future<SyncResult> pushPending() async {

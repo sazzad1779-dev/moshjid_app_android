@@ -39,6 +39,14 @@ class Profile {
   final DateTime clientCreatedAt;
   final DateTime? syncedAt;
 
+  /// Soft-deleted. Hidden from the roster, but the row is kept so every
+  /// transaction that references it keeps resolving to a real donor.
+  ///
+  /// Never a hard delete: `transactions.member_id` is
+  /// `ON DELETE SET NULL`, so removing the profile would strip the member link
+  /// from this person's whole payment history.
+  final bool isDeleted;
+
   const Profile({
     required this.id,
     this.remoteId,
@@ -50,6 +58,7 @@ class Profile {
     this.source = ProfileSource.local,
     required this.clientCreatedAt,
     this.syncedAt,
+    this.isDeleted = false,
   });
 
   /// Donors and operators share one table, but only donors belong in the picker.
@@ -80,11 +89,11 @@ class Profile {
 
   /// Whether this donor still needs pushing.
   ///
-  /// Deliberately `remoteId == null` and nothing else, because that is exactly
-  /// what `LocalDb.pendingProfiles` queues on. Testing `syncedAt` as well let a
-  /// row that had a uuid but a null timestamp render as "Waiting to sync" and
-  /// sit in the nav badge forever, while no sync would ever pick it up.
-  bool get isPending => remoteId == null;
+  /// `synced_at IS NULL` is the queue, exactly as `LocalDb.pendingProfiles`
+  /// selects it. Editing a donor clears [syncedAt] while keeping [remoteId], so
+  /// testing the remote id instead would report an edited donor as done and its
+  /// changes would never upload.
+  bool get isPending => syncedAt == null;
   bool get isMember => role == memberRole;
 
   /// Identity per [NameKey]. Must match `profiles.match_key` exactly.
@@ -129,6 +138,8 @@ class Profile {
     String? source,
     DateTime? clientCreatedAt,
     DateTime? syncedAt,
+    bool clearSyncedAt = false,
+    bool? isDeleted,
   }) =>
       Profile(
         id: id ?? this.id,
@@ -140,7 +151,58 @@ class Profile {
         isMonthly: isMonthly ?? this.isMonthly,
         source: source ?? this.source,
         clientCreatedAt: clientCreatedAt ?? this.clientCreatedAt,
-        syncedAt: syncedAt ?? this.syncedAt,
+        syncedAt: clearSyncedAt ? null : (syncedAt ?? this.syncedAt),
+        isDeleted: isDeleted ?? this.isDeleted,
+      );
+
+  /// Returns an edited copy with the identity keys recomputed from the new
+  /// details.
+  ///
+  /// The local id and [remoteId] are deliberately preserved. Every transaction
+  /// ever recorded against this donor points at [id], and the server row is
+  /// found by [remoteId], so neither may move on an edit.
+  ///
+  /// [syncedAt] resets so the next sync upserts the change. [isDeleted] resets
+  /// too: re-adding a member who was deleted in error should bring them back,
+  /// and because `ux_profiles_match_key` still reserves their identity this
+  /// resurrects the same server row rather than creating a duplicate.
+  Profile applyEdit({
+    required String fullName,
+    String? phone,
+    bool clearPhone = false,
+    bool? isMonthly,
+  }) =>
+      Profile(
+        id: id,
+        remoteId: remoteId,
+        fullName: fullName.trim(),
+        phone: clearPhone ? null : ((phone ?? this.phone)?.trim()),
+        role: role,
+        status: status,
+        isMonthly: isMonthly ?? this.isMonthly,
+        source: source,
+        clientCreatedAt: clientCreatedAt,
+        syncedAt: null,
+        isDeleted: false,
+      );
+
+  /// The copy a delete leaves behind: kept in the roster cache, flagged, and
+  /// re-queued so the server learns about it.
+  ///
+  /// Built directly rather than through [copyWith] because that cannot clear
+  /// [syncedAt] -- it falls back to the current value on null, which would leave
+  /// the delete sitting unsynced and unqueued.
+  Profile get asDeleted => Profile(
+        id: id,
+        remoteId: remoteId,
+        fullName: fullName,
+        phone: phone,
+        role: role,
+        status: status,
+        isMonthly: isMonthly,
+        source: source,
+        clientCreatedAt: clientCreatedAt,
+        isDeleted: true,
       );
 
   /// Builds a donor the user just typed into the form. The caller generates
@@ -182,6 +244,7 @@ class Profile {
         'source': source,
         'client_created_at': clientCreatedAt.toIso8601String(),
         'synced_at': syncedAt?.toIso8601String(),
+        'is_deleted': isDeleted ? 1 : 0,
       };
 
   factory Profile.fromLocalMap(Map<String, dynamic> m) => Profile(
@@ -196,6 +259,7 @@ class Profile {
         clientCreatedAt: DateTime.parse(m['client_created_at'] as String),
         syncedAt:
             m['synced_at'] == null ? null : DateTime.parse(m['synced_at'] as String),
+        isDeleted: (m['is_deleted'] as int? ?? 0) == 1,
       );
 
 /// Row shape returned by a `select` against `profiles`.
@@ -232,6 +296,7 @@ class Profile {
                     ?.toLocal() ??
                 DateTime.now(),
         syncedAt: DateTime.now(),
+        isDeleted: m['is_deleted'] as bool? ?? false,
       );
 
   /// Payload for the `profiles` upsert.
@@ -243,6 +308,11 @@ class Profile {
   ///
   /// Deliberately excludes `name_key` and `match_key`: Postgres computes them,
   /// and sending them fails against a generated column.
+  ///
+  /// `created_at` is only sent on the row's first upload. On an edit it would
+  /// restamp the server's creation date, which `profiles_first_wins` and the
+  /// duplicate merge both read to decide who came first -- rewriting it would
+  /// reorder precedence.
   Map<String, dynamic> toSupabaseMap() {
     final now = DateTime.now().toUtc().toIso8601String();
     return {
@@ -252,9 +322,10 @@ class Profile {
       'role': role,
       'status': pushStatus,
       'is_monthly': isMonthly,
+      'is_deleted': isDeleted,
       'client_created_at': clientCreatedAt.toUtc().toIso8601String(),
-      'created_at': now,
       'updated_at': now,
+      if (remoteId == null) 'created_at': now,
     };
   }
 

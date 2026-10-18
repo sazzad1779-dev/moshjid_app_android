@@ -5,7 +5,8 @@ import '../config/app_config.dart';
 import '../data/local/local_db.dart';
 import '../data/models/profile.dart';
 import '../data/models/txn.dart';
-import 'widgets/member_editor.dart' show showNewMemberDialog;
+import 'widgets/member_editor.dart'
+    show showEditMemberDialog, showNewMemberDialog;
 import 'widgets/member_picker.dart';
 import 'widgets/txn_form_sheet.dart';
 import 'widgets/type_selector.dart';
@@ -227,6 +228,11 @@ class _MemberDetailSheetState extends State<_MemberDetailSheet> {
   List<Txn> _txns = const [];
   bool _loading = true;
 
+  /// The member as it currently stands. [widget.member] is a snapshot taken
+  /// when the sheet opened, so an edit has to be re-read or the header keeps
+  /// showing the old name for the rest of the session.
+  late Profile _member = widget.member;
+
   @override
   void initState() {
     super.initState();
@@ -235,9 +241,11 @@ class _MemberDetailSheetState extends State<_MemberDetailSheet> {
 
   Future<void> _load() async {
     final rows = await widget.local.txnsForMember(widget.member.id);
+    final fresh = await widget.local.findProfileById(widget.member.id);
     if (!mounted) return;
     setState(() {
       _txns = rows;
+      if (fresh != null) _member = fresh;
       _loading = false;
     });
   }
@@ -262,7 +270,7 @@ class _MemberDetailSheetState extends State<_MemberDetailSheet> {
         local: widget.local,
         initialType: 'income',
         initialCategory: category,
-        initialMember: widget.member,
+        initialMember: _member,
         onSave: (t) async {
           await widget.local.insertTxn(t);
           await _load();
@@ -270,6 +278,50 @@ class _MemberDetailSheetState extends State<_MemberDetailSheet> {
         },
       ),
     );
+  }
+
+  Future<void> _editMember() async {
+    final saved = await showEditMemberDialog(context,
+        member: _member, local: widget.local);
+    if (saved == null || !mounted) return;
+    // The sheet holds a snapshot, so reload the record it is showing.
+    await _load();
+    await widget.onDataChanged();
+  }
+
+  /// Removes the member from the roster.
+  ///
+  /// Not a hard delete: their payment history still references them, so the row
+  /// is flagged and hidden rather than removed. The wording says so, because
+  /// "Delete" on a donation record otherwise implies the history goes too.
+  Future<void> _deleteMember() async {
+    final count = _txns.length;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove member?'),
+        content: Text(
+          count == 0
+              ? '${_member.fullName} will be removed from the member list.'
+              : '${_member.fullName} will be removed from the member list.\n\n'
+                  'Their $count recorded transaction(s) are kept and stay linked '
+                  'to this member.',
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Remove')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await widget.local.softDeleteProfile(_member.id);
+    if (!mounted) return;
+    Navigator.pop(context);
+    await widget.onDataChanged();
   }
 
   /// The category whose income rows belong to a member. Derived from the config
@@ -286,7 +338,7 @@ class _MemberDetailSheetState extends State<_MemberDetailSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final m = widget.member;
+    final m = _member;
     final fmt = NumberFormat('#,##0.##');
     final collected = _txns
         .where((t) => t.type == 'income')
@@ -334,6 +386,14 @@ class _MemberDetailSheetState extends State<_MemberDetailSheet> {
                     ],
                   ),
                 ),
+                IconButton(
+                    tooltip: 'Edit member',
+                    icon: const Icon(Icons.edit_outlined),
+                    onPressed: _editMember),
+                IconButton(
+                    tooltip: 'Remove member',
+                    icon: const Icon(Icons.person_remove_outlined),
+                    onPressed: _deleteMember),
                 IconButton(
                     icon: const Icon(Icons.close),
                     onPressed: () => Navigator.pop(context)),

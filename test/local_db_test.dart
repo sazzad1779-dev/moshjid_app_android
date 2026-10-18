@@ -310,6 +310,134 @@ void main() {
       });
     });
 
+    });
+
+  group('member edits and deletes', () {
+    test('an edit rewrites the keys and re-queues the donor for upload',
+        () async {
+      await LocalDb.withTempDb((db) async {
+        final p = await db.ensureProfile(fullName: 'Roxi');
+        await db.markProfileSynced(id: p.id, remoteId: 'server-uuid');
+        expect(await db.pendingProfileCount(), 0);
+
+        final problem = await db.updateProfile(
+          id: p.id,
+          fullName: 'Roxi Ahmed',
+          phone: '01712345678',
+        );
+        expect(problem, isNull);
+
+        final after = (await db.findProfileById(p.id))!;
+        expect(after.fullName, 'Roxi Ahmed');
+        // The phone now leads the identity, so the key changes with it.
+        expect(after.matchKey, 'p:01712345678');
+        // Identity must not move: transactions point at the local id and the
+        // server row is found by remoteId.
+        expect(after.id, p.id);
+        expect(after.remoteId, 'server-uuid');
+        // Cleared so the next sync uploads it.
+        expect(after.syncedAt, isNull);
+        expect(after.isPending, isTrue);
+        expect((await db.pendingProfiles()).single.id, p.id);
+      });
+    });
+
+    test('an edit onto somebody else\'s identity is refused, not merged',
+        () async {
+      await LocalDb.withTempDb((db) async {
+        await db.ensureProfile(fullName: 'Roxi');
+        final other = await db.ensureProfile(fullName: 'Roxi Ahmed');
+
+        final problem = await db.updateProfile(
+          id: other.id,
+          fullName: 'Roxi',
+        );
+
+        expect(problem, contains('Roxi'));
+        expect((await db.findProfileById(other.id))!.fullName, 'Roxi Ahmed',
+            reason: 'a refused edit must not have written anything');
+      });
+    });
+
+    test('deleting hides the member but keeps the row for their history',
+        () async {
+      await LocalDb.withTempDb((db) async {
+        final p = await db.ensureProfile(fullName: 'Roxi');
+        await db.markProfileSynced(id: p.id, remoteId: 'server-uuid');
+        await db.insertTxn(Txn.create(
+          type: 'income',
+          category: 'Imam Hadiya',
+          amount: 300,
+          paymentMethod: 'cash',
+          enteredBy: 'op-1',
+          memberId: p.id,
+        ));
+
+        await db.softDeleteProfile(p.id);
+
+        // Gone from the roster...
+        expect((await db.allProfiles()).map((x) => x.id), isNot(contains(p.id)));
+        expect((await db.searchProfiles('Roxi')), isEmpty);
+        // ...but the row survives, so the transaction still resolves to a donor.
+        expect(await db.findProfileById(p.id), isNotNull);
+        expect((await db.txnsForMember(p.id)).length, 1);
+        // And the server has not been told yet.
+        expect((await db.pendingProfiles()).single.id, p.id);
+      });
+    });
+
+    test('a pull does not resurrect a delete that has not been uploaded',
+        () async {
+      await LocalDb.withTempDb((db) async {
+        final p = await db.ensureProfile(fullName: 'Roxi');
+        await db.markProfileSynced(id: p.id, remoteId: 'server-uuid');
+        await db.softDeleteProfile(p.id);
+
+        // pullProfiles runs before pushProfiles, so the server's still-live row
+        // arrives here. Taking its is_deleted=false would undo the delete and
+        // mark the row synced, losing it entirely.
+        await db.upsertCloudProfile({
+          'id': 'server-uuid',
+          'full_name': 'Roxi',
+          'role': 'member',
+          'status': 'active',
+          'is_monthly': true,
+          'is_deleted': false,
+          'client_created_at': DateTime(2024, 1, 1).toIso8601String(),
+          'created_at': DateTime(2024, 1, 1).toIso8601String(),
+        });
+
+        expect((await db.findProfileById(p.id))!.isDeleted, isTrue);
+        expect((await db.pendingProfiles()).single.id, p.id);
+      });
+    });
+
+    test('re-adding a deleted member clears the flag instead of duplicating',
+        () async {
+      await LocalDb.withTempDb((db) async {
+        final p = await db.ensureProfile(fullName: 'Roxi');
+        await db.markProfileSynced(id: p.id, remoteId: 'server-uuid');
+        await db.softDeleteProfile(p.id);
+
+        final again = await db.ensureProfile(fullName: 'Roxi');
+
+        // Same row, not a twin: ux_profiles_match_key still reserves the
+        // identity on both sides, so this has to resurrect it.
+        expect(again.id, p.id);
+        expect((await db.allProfiles()).length, 1);
+      });
+    });
+
+    test('a synced donor is not pending, an edited one is', () async {
+      await LocalDb.withTempDb((db) async {
+        final p = await db.ensureProfile(fullName: 'Roxi');
+        expect(p.isPending, isTrue);
+        await db.markProfileSynced(id: p.id, remoteId: 'server-uuid');
+        expect((await db.findProfileById(p.id))!.isPending, isFalse);
+        expect(await db.pendingProfileCount(), 0);
+      });
+    });
+
     test('pending donors are ordered oldest first so the first one wins', () async {
       await LocalDb.withTempDb((db) async {
         // Insert directly with explicit timestamps; ensureProfile has no

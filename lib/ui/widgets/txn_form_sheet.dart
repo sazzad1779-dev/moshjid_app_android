@@ -64,6 +64,14 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
   /// The member this transaction belongs to, when the category takes one.
   Profile? _donor;
 
+  /// Free-text donor name, used only when no [Profile] is linked.
+  ///
+  /// The two are mutually exclusive by design: a transaction records either a
+  /// link to a member in the roster, or a name typed on the spot. Carrying both
+  /// would mean the typed text and the linked record could disagree about who
+  /// the payment belongs to.
+  final _memberText = TextEditingController();
+
   /// What has been typed into the category box. [SearchPickerField] does not
   /// filter on its own -- the caller supplies the narrowed list -- so this is
   /// what makes typing in the category box do anything.
@@ -78,10 +86,21 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
           .map((n) => PickerOption(value: n, label: n))
           .toList();
 
-  /// Only some categories are attributed to a named member. "Imam Hadiya" exists
-  /// as both income and expense; only the income side has members, because that
-  /// is the side where people hand money in.
-  bool get _categoryTakesDonor => AppConfig.categoryTakesDonor(_category, _type);
+  /// Whether the member field is offered.
+  ///
+  /// Every *income* category gets it, not just the ones in
+  /// [AppConfig.donorCategories]. That set still exists for a narrower job:
+  /// naming the category the Members tab uses for "Record a payment". Filtering
+  /// the form by it would leave a collector unable to say who paid a donation
+  /// outside Imam Hadiya, which is the case that most needs recording.
+  ///
+  /// Income only. Money coming in is attributed to whoever handed it over;
+  /// money going out is supplies, rent, the imam's payout -- there is nobody on
+  /// the other end to name.
+  ///
+  /// Nothing here forces a member: choosing from the roster, typing a name and
+  /// leaving it empty are all valid answers.
+  bool get _categoryTakesDonor => _type == 'income';
 
   /// [SearchPickerField] shows whatever it is handed, so the category list is
   /// narrowed here rather than in the widget. Substring match, case and
@@ -124,6 +143,7 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
         ..._cats,
       ];
       if (widget.initialMember != null) _donor = widget.initialMember;
+      if (_donor != null) _memberText.text = _donor!.displayName;
     }
     _loadCats();
     _loadDonor();
@@ -134,6 +154,7 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
     _amount.dispose();
     _desc.dispose();
     _receipt.dispose();
+    _memberText.dispose();
     super.dispose();
   }
 
@@ -173,7 +194,10 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
       _cats = _categoryOptions(type);
       _category = _cats.isEmpty ? _category : _cats.first.value;
       _catQuery = '';
-      _clearDonorIfNotNeeded();
+      // Switching to a type with no member field must not carry a member the
+      // collector can no longer see or change. Changing category is different:
+      // the field stays put across income categories, so the member stays too.
+      if (!_categoryTakesDonor) _clearMember();
     });
     _loadCats();
   }
@@ -182,14 +206,7 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
     setState(() {
       _category = option.value;
       _catQuery = '';
-      _clearDonorIfNotNeeded();
     });
-  }
-
-  /// Switching away from a member category drops the member, so a transaction
-  /// never carries someone who has nothing to do with it.
-  void _clearDonorIfNotNeeded() {
-    if (!_categoryTakesDonor && _donor != null) _donor = null;
   }
 
   /// Opens the roster. A pick replaces the current member; the add button inside
@@ -199,22 +216,52 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
   Future<void> _pickMember() async {
     final picked = await showMemberPicker(context, local: _local, initial: _donor);
     if (picked == null || !mounted) return;
-    setState(() => _donor = picked);
+    // Picking takes over the field; whatever free text was there is replaced so
+    // the transaction can never name one person and link another.
+    setState(() {
+      _donor = picked;
+      _memberText.text = picked.displayName;
+    });
   }
+
+  /// Typing switches the field into free-text mode.
+  ///
+  /// Editing the text of a linked member is how the user says "this is not that
+  /// person any more", so the link is dropped rather than left contradicting the
+  /// text sitting in the box.
+  void _onMemberTyped(String value) {
+    if (_donor != null) setState(() => _donor = null);
+  }
+
+  void _clearMember() {
+    setState(() {
+      _donor = null;
+      _memberText.clear();
+    });
+  }
+
+  /// The name recorded on the transaction: the linked member, or the typed text.
+  String? get _donorName {
+    if (_donor != null) return _donor!.displayName;
+    final t = _memberText.text.trim();
+    return t.isEmpty ? null : t;
+  }
+
+  bool get _hasMember => _donor != null || _memberText.text.trim().isNotEmpty;
 
   Future<void> _save() async {
     if (!(_form.currentState?.validate() ?? false)) return;
 
-    // A member category with no member is almost always a slip, and the amount
-    // is then unattributable on the server. Say so rather than silently saving.
-    if (_categoryTakesDonor && _donor == null) {
+    // Income with nobody attached to it is usually a slip, and the amount is then
+    // unattributable on the server. Ask rather than silently saving.
+    if (_categoryTakesDonor && !_hasMember) {
       final proceed = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('No member selected'),
+          title: const Text('No member'),
           content: const Text(
-              'Transactions in this category are normally recorded against a '
-              'member. Save without one?'),
+              'Income is normally recorded against a member. Choose one, or '
+              'type a name, or save without either?'),
           actions: [
             TextButton(
                 onPressed: () => Navigator.pop(ctx, false),
@@ -262,7 +309,7 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
                 : _receipt.text.trim(),
             date: _date,
             memberId: _donor?.id,
-            donorName: _donor?.displayName,
+            donorName: _donorName,
             donorPhone: _donor?.phone,
           )
         : ex.applyEdit(
@@ -277,7 +324,7 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
             date: _date,
             enteredBy: enteredBy,
             memberId: _donor?.id,
-            donorName: _donor?.displayName,
+            donorName: _donorName,
             donorPhone: _donor?.phone,
           );
     await widget.onSave(t);
@@ -325,8 +372,10 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
                 const _FieldLabel('Member'),
                 _MemberField(
                   member: _donor,
+                  controller: _memberText,
+                  onChanged: _onMemberTyped,
                   onTap: _pickMember,
-                  onClear: () => setState(() => _donor = null),
+                  onClear: _clearMember,
                 ),
               ],
               const SizedBox(height: 16),
@@ -492,6 +541,8 @@ class _FieldLabel extends StatelessWidget {
 /// before: the member existed only as a dropdown nobody could browse.
 class _MemberField extends StatelessWidget {
   final Profile? member;
+  final TextEditingController? controller;
+  final ValueChanged<String>? onChanged;
   final VoidCallback onTap;
   final VoidCallback onClear;
 
@@ -499,76 +550,73 @@ class _MemberField extends StatelessWidget {
     required this.member,
     required this.onTap,
     required this.onClear,
+    this.controller,
+    this.onChanged,
   });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final m = member;
+    final typed = controller?.text.trim() ?? '';
 
-    if (m == null) {
-      return OutlinedButton.icon(
-        onPressed: onTap,
-        icon: const Icon(Icons.person_search),
-        style: OutlinedButton.styleFrom(
-          minimumSize: const Size.fromHeight(48),
-          alignment: Alignment.centerLeft,
-        ),
-        label: const Text('Choose member'),
-      );
-    }
+    // Linked and free-text are mutually exclusive, so there are only two states
+    // to draw. A picked member shows their record; anything else is free text,
+    // which is recorded on the transaction and creates no profile.
+    final subtitle = m != null
+        ? (m.isPending
+            ? 'New on this device — syncs later'
+            : (m.phone ?? 'Member'))
+        : (typed.isEmpty ? 'Choose a member or type a name' : 'Name only — not saved as a member');
 
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: theme.colorScheme.outline),
-      ),
-      padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
-      child: Row(
-        children: [
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (m != null) ...[
           CircleAvatar(
             radius: 18,
             backgroundColor: m.isPending
                 ? theme.colorScheme.tertiaryContainer
                 : theme.colorScheme.primaryContainer,
             child: Text(initialsOf(m.displayName),
-                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                style: const TextStyle(
+                    fontSize: 13, fontWeight: FontWeight.w600)),
           ),
           const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(m.displayName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w600)),
-                Text(
-                  m.isPending
-                      ? 'New on this device — syncs later'
-                      : (m.phone ?? 'Member'),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
+        ],
+        Expanded(
+          child: TextFormField(
+            controller: controller,
+            onChanged: onChanged,
+            textCapitalization: TextCapitalization.words,
+            decoration: InputDecoration(
+              hintText: 'Choose a member or type a name',
+              helperText: subtitle,
+              helperMaxLines: 2,
+              helperStyle: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+              suffixIcon: m != null
+                  ? IconButton(
+                      tooltip: 'Clear member',
+                      icon: const Icon(Icons.close, size: 18),
+                      onPressed: onClear,
+                    )
+                  : null,
+              border: const OutlineInputBorder(),
             ),
           ),
-          IconButton(
-            tooltip: 'Change member',
-            icon: const Icon(Icons.swap_horiz),
+        ),
+        const SizedBox(width: 4),
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: IconButton(
+            tooltip: 'Choose from members',
+            icon: const Icon(Icons.person_search),
             onPressed: onTap,
           ),
-          IconButton(
-            tooltip: 'Remove member',
-            icon: const Icon(Icons.close, size: 18),
-            onPressed: onClear,
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

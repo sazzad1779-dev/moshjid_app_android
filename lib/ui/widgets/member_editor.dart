@@ -22,9 +22,30 @@ Future<Profile?> showNewMemberDialog(BuildContext context, {LocalDb? local}) {
   );
 }
 
+/// Dialog for changing a member who already exists.
+///
+/// Separate from [showNewMemberDialog] because the rules differ: an edit has an
+/// identity to preserve and can be refused for colliding with somebody else,
+/// where a create silently merges. Returns the updated member, or null if the
+/// user backed out.
+Future<Profile?> showEditMemberDialog(
+  BuildContext context, {
+  required Profile member,
+  LocalDb? local,
+}) {
+  return showDialog<Profile>(
+    context: context,
+    builder: (ctx) => _NewMemberDialog(local: local, existing: member),
+  );
+}
+
 class _NewMemberDialog extends StatefulWidget {
   final LocalDb? local;
-  const _NewMemberDialog({this.local});
+
+  /// When set the dialog edits this member instead of creating one.
+  final Profile? existing;
+
+  const _NewMemberDialog({this.local, this.existing});
 
   @override
   State<_NewMemberDialog> createState() => _NewMemberDialogState();
@@ -32,9 +53,20 @@ class _NewMemberDialog extends StatefulWidget {
 
 class _NewMemberDialogState extends State<_NewMemberDialog> {
   final _form = GlobalKey<FormState>();
-  final _name = TextEditingController();
-  final _phone = TextEditingController();
+  late final TextEditingController _name;
+  late final TextEditingController _phone;
   bool _saving = false;
+  String? _error;
+
+  bool get _isEdit => widget.existing != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existing;
+    _name = TextEditingController(text: e?.fullName ?? '');
+    _phone = TextEditingController(text: e?.phone ?? '');
+  }
 
   @override
   void dispose() {
@@ -55,7 +87,44 @@ class _NewMemberDialogState extends State<_NewMemberDialog> {
 
   Future<void> _save() async {
     if (!(_form.currentState?.validate() ?? false)) return;
-    setState(() => _saving = true);
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+
+    if (_isEdit) {
+      final local = widget.local;
+      if (local == null) {
+        if (!mounted) return;
+        Navigator.pop(
+          context,
+          widget.existing!.applyEdit(
+            fullName: _name.text,
+            phone: _phone.text,
+            clearPhone: _phone.text.trim().isEmpty,
+          ),
+        );
+        return;
+      }
+      final problem = await local.updateProfile(
+        id: widget.existing!.id,
+        fullName: _name.text,
+        phone: _phone.text,
+        clearPhone: _phone.text.trim().isEmpty,
+      );
+      if (!mounted) return;
+      if (problem != null) {
+        setState(() {
+          _saving = false;
+          _error = problem;
+        });
+        return;
+      }
+      final updated = await local.findProfileById(widget.existing!.id);
+      if (!mounted) return;
+      Navigator.pop(context, updated);
+      return;
+    }
 
     final existing = await _existingMatch();
     if (existing != null) {
@@ -91,12 +160,17 @@ class _NewMemberDialogState extends State<_NewMemberDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('New member'),
+      title: Text(_isEdit ? 'Edit member' : 'New member'),
       content: Form(
         key: _form,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (_error != null) ...[
+              Text(_error!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              const SizedBox(height: 12),
+            ],
             TextFormField(
               controller: _name,
               autofocus: true,
@@ -132,7 +206,9 @@ class _NewMemberDialogState extends State<_NewMemberDialog> {
         ),
         FilledButton(
           onPressed: _saving ? null : _save,
-          child: Text(_saving ? 'Saving…' : 'Add member'),
+          child: Text(_saving
+                ? 'Saving…'
+                : (_isEdit ? 'Save changes' : 'Add member')),
         ),
       ],
     );

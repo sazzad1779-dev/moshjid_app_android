@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../data/local/local_db.dart';
 import '../data/sync/sync_service.dart';
+import 'dashboard_page.dart';
 import 'members_page.dart';
 import 'transactions_page.dart';
 
@@ -149,9 +150,6 @@ class _AppShellState extends State<AppShell> {
       body: IndexedStack(
         index: _tab,
         children: [
-          // Keys stay stable and the pages reload on a revision change, so the
-          // member tab keeps its scroll position and search text when a
-          // transaction is added on the other tab.
           TransactionsPage(
             revision: _revision,
             syncing: _syncing,
@@ -160,6 +158,14 @@ class _AppShellState extends State<AppShell> {
             onSync: _manualSync,
             onDataChanged: onDataChanged,
             onOpenMembers: () => setState(() => _tab = 1),
+          ),
+          DashboardPage(
+            revision: _revision,
+            syncing: _syncing,
+            pendingTxns: _pendingTxns,
+            pendingMembers: _pendingMembers,
+            onSync: _manualSync,
+            onDataChanged: onDataChanged,
           ),
           MembersPage(
             revision: _revision,
@@ -175,6 +181,11 @@ class _AppShellState extends State<AppShell> {
             icon: Icon(Icons.receipt_long_outlined),
             selectedIcon: Icon(Icons.receipt_long),
             label: 'Transactions',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.dashboard_outlined),
+            selectedIcon: Icon(Icons.dashboard),
+            label: 'Dashboard',
           ),
           NavigationDestination(
             icon: _pendingMembers > 0

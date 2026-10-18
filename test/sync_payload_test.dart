@@ -164,6 +164,78 @@ void main() {
     });
   });
 
+  group('free-text donors', () {
+    test('a typed name rides along with no member link', () {
+      final t = txnWith(memberId: null, donorName: 'Walk-in Donor');
+      final payload = SyncService.buildPayload(t, donor: null);
+
+      expect(payload['donor_name'], 'Walk-in Donor');
+      // No profile was linked, so the key must be absent rather than null --
+      // this is an upsert, and a null would wipe a value the server already has.
+      expect(payload.containsKey('member_id'), isFalse);
+    });
+
+    test('a typed donor is never held waiting for a member to sync', () {
+      // This is the whole point of free text: it must not block on the member
+      // push, or an unnamed cash payment could never be recorded online.
+      final t = txnWith(memberId: null, donorName: 'Walk-in Donor');
+      expect(SyncService.isHeldForDonor(t, null), isFalse);
+      expect(t.hasDonor, isTrue, reason: 'a name alone still counts as a donor');
+    });
+
+    test('an empty typed name is not a donor at all', () {
+      final t = txnWith(memberId: null, donorName: '   ');
+      expect(SyncService.isHeldForDonor(t, null), isFalse);
+    });
+
+    test('a linked member still wins over anything typed', () {
+      final t = txnWith(memberId: 'local-uuid', donorName: 'Roxi');
+      final payload = SyncService.buildPayload(t, donor: donor(remoteId: 'srv'));
+      expect(payload['member_id'], 'srv');
+      expect(payload['donor_name'], 'Roxi');
+    });
+  });
+
+  group('member edit and delete payloads', () {
+    test('an edit does not restamp created_at on the server row', () {
+      // created_at drives "keep the first" precedence in both the trigger and
+      // the duplicate merge. Rewriting it on an edit would reorder who wins.
+      final edited = donor(remoteId: 'server-uuid')
+          .applyEdit(fullName: 'Roxi Ahmed', phone: '01712345678');
+      final payload = edited.toSupabaseMap();
+      expect(payload.containsKey('created_at'), isFalse);
+      expect(payload['updated_at'], isNotNull);
+    });
+
+    test('a new donor sends created_at because the row does not exist yet', () {
+      final payload = donor(remoteId: null).toSupabaseMap();
+      expect(payload['created_at'], isNotNull);
+    });
+
+    test('a delete sends is_deleted rather than removing the row', () {
+      final payload =
+          donor(remoteId: 'server-uuid').asDeleted.toSupabaseMap();
+      expect(payload['is_deleted'], isTrue);
+      // The id stays: the row is retained so transactions keep resolving.
+      expect(payload['id'], 'server-uuid');
+    });
+
+    test('an edit preserves the local id and the server uuid', () {
+      final edited = donor(remoteId: 'server-uuid').applyEdit(fullName: 'New');
+      expect(edited.id, 'local-uuid');
+      expect(edited.remoteId, 'server-uuid');
+      expect(edited.pushId, 'server-uuid',
+          reason: 'an edit must update the existing row, not insert a new one');
+    });
+
+    test('an edit clears the deleted flag so re-adding brings them back', () {
+      final revived = donor(remoteId: 'server-uuid').asDeleted
+          .applyEdit(fullName: 'Roxi');
+      expect(revived.isDeleted, isFalse);
+      expect(revived.syncedAt, isNull, reason: 'and is re-queued for upload');
+    });
+  });
+
   group('SyncResult', () {
     test('is quiet only when nothing happened and nothing failed', () {
       expect(const SyncResult().isQuiet, isTrue);

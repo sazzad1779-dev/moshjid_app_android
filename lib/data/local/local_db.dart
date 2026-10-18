@@ -18,7 +18,7 @@ class LocalDb {
   static const _catTable = 'categories_cache';
   static const _profileTable = 'profiles_cache';
 
-  static const _version = 4;
+  static const _version = 5;
 
   /// The one open handle used by the app.
   static final LocalDb instance = LocalDb._();
@@ -83,6 +83,13 @@ class LocalDb {
         if (oldV < 4) {
           await _createProfiles(d);
           await _addTxnDonorColumns(d);
+        }
+        // v4 -> v5: donor soft delete. Guarded on oldV >= 4 because a v3 or
+        // older install has no profiles_cache yet -- the step above creates it
+        // already carrying this column, and adding it twice is a hard error.
+        if (oldV >= 4 && oldV < 5) {
+          await d.execute(
+              'ALTER TABLE $_profileTable ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0');
         }
       },
     );
@@ -151,7 +158,8 @@ class LocalDb {
         is_monthly INTEGER NOT NULL DEFAULT 1,
         source TEXT NOT NULL,
         client_created_at TEXT NOT NULL,
-        synced_at TEXT
+        synced_at TEXT,
+        is_deleted INTEGER NOT NULL DEFAULT 0
       )
     ''');
     // The offline "keep the first one" rule, enforced by SQLite. Inserting a
@@ -299,7 +307,20 @@ class LocalDb {
     final matchKey = NameKey.match(name: fullName, phone: phone);
 
     final existing = await findProfileByMatchKey(matchKey);
-    if (existing != null) return existing;
+    if (existing != null) {
+      // Re-adding someone who was removed in error brings them back. Resurrect
+      // the same row rather than making a twin: ux_profiles_match_key still
+      // reserves their identity on both sides, so a second row could not exist.
+      if (existing.isDeleted) {
+        await updateProfile(
+          id: existing.id,
+          fullName: existing.fullName,
+          phone: existing.phone,
+        );
+        return (await findProfileById(existing.id)) ?? existing;
+      }
+      return existing;
+    }
 
     final created = Profile.create(
       id: const Uuid().v4(),
@@ -329,6 +350,11 @@ class LocalDb {
 
     final byMatch = await findProfileByMatchKey(matchKey);
     if (byMatch != null) {
+      // A delete made on this device but not yet uploaded outranks whatever the
+      // server still says. pullProfiles runs before pushProfiles, so taking
+      // `incoming` here would resurrect the member; stamping `syncedAt` would go
+      // further and mark the delete as delivered, losing it for good.
+      final keepDelete = byMatch.isDeleted && byMatch.syncedAt == null;
       final merged = byMatch.copyWith(
         remoteId: incoming.remoteId,
         fullName: incoming.fullName,
@@ -343,7 +369,13 @@ class LocalDb {
         clientCreatedAt: incoming.clientCreatedAt.isBefore(byMatch.clientCreatedAt)
             ? incoming.clientCreatedAt
             : byMatch.clientCreatedAt,
-        syncedAt: DateTime.now(),
+        // A delete this device has made but not yet uploaded outranks whatever
+        // the server still says. pullProfiles runs before pushProfiles, so
+        // taking `incoming` here would resurrect the member and mark the row
+        // synced -- losing the delete entirely.
+        isDeleted: keepDelete ? true : incoming.isDeleted,
+        syncedAt: keepDelete ? null : DateTime.now(),
+        clearSyncedAt: keepDelete,
       );
       await d.update(_profileTable, merged.toLocalMap(),
           where: 'id = ?', whereArgs: [byMatch.id]);
@@ -400,17 +432,74 @@ class LocalDb {
     );
   }
 
+  /// Donors whose local copy differs from the server, oldest change first.
+  ///
+  /// Queued on `synced_at IS NULL`, which is what both a brand new donor and an
+  /// edited one look like. Filtering on `remote_id IS NULL` instead would only
+  /// ever catch new donors, and every edit would be silently dropped.
+  /// Rewrites a donor's details and re-queues it for upload.
+  ///
+  /// Identity follows the new details: changing the name or phone changes
+  /// [Profile.matchKey], and the server's `ux_profiles_match_key` is UNIQUE, so
+  /// a collision is refused here rather than being discovered as a 23505 on a
+  /// later sync with no way to tell which donor it was.
+  ///
+  /// The local [Profile.id] and [remoteId] never move, so every transaction that
+  /// already points at this donor keeps resolving to them.
+  ///
+  /// Returns null on success, or a message explaining why it was refused.
+  Future<String?> updateProfile({
+    required String id,
+    required String fullName,
+    String? phone,
+    bool clearPhone = false,
+    bool? isMonthly,
+  }) async {
+    final d = await db;
+    final current = await findProfileById(id);
+    if (current == null) return 'This member is no longer on the device.';
+
+    final edited =
+        current.applyEdit(fullName: fullName, phone: phone, clearPhone: clearPhone, isMonthly: isMonthly);
+
+    // The unique index on match_key is what stops one person existing twice
+    // locally; check it before writing rather than letting the insert fail.
+    final clash = await findProfileByMatchKey(edited.matchKey);
+    if (clash != null && clash.id != id) {
+      return 'Another member already uses this name and phone: ${clash.fullName}.';
+    }
+
+    await d.update(_profileTable, edited.toLocalMap(),
+        where: 'id = ?', whereArgs: [id]);
+    return null;
+  }
+
+  /// Flags a donor as deleted locally and re-queues it for upload.
+  ///
+  /// Not a row removal. `transactions.member_id` is
+  /// `ON DELETE SET NULL`, so deleting the profile would strip the member link
+  /// from this person's whole payment history. The row stays, hidden from the
+  /// roster, and the server is told on the next sync.
+  Future<void> softDeleteProfile(String id) async {
+    final d = await db;
+    final current = await findProfileById(id);
+    if (current == null) return;
+    // asDeleted drops syncedAt, which is what puts it back in the push queue.
+    await d.update(_profileTable, current.asDeleted.toLocalMap(),
+        where: 'id = ?', whereArgs: [id]);
+  }
+
   Future<List<Profile>> pendingProfiles() async {
     final d = await db;
     final rows = await d.query(_profileTable,
-        where: 'remote_id IS NULL', orderBy: 'client_created_at ASC');
+        where: 'synced_at IS NULL', orderBy: 'client_created_at ASC');
     return rows.map(Profile.fromLocalMap).toList();
   }
 
   Future<int> pendingProfileCount() async {
     final d = await db;
     final r = await d.rawQuery(
-        'SELECT COUNT(*) as c FROM $_profileTable WHERE remote_id IS NULL');
+        'SELECT COUNT(*) as c FROM $_profileTable WHERE synced_at IS NULL');
     return (r.first['c'] as int?) ?? 0;
   }
 
@@ -436,7 +525,7 @@ class LocalDb {
     final d = await db;
     final q = NameKey.name(query);
 
-    final where = <String>[];
+    final where = <String>['is_deleted = 0'];
     final args = <Object?>[];
     if (!includeStaff) {
       where.add('role = ?');
@@ -487,12 +576,13 @@ class LocalDb {
     return (r.first['s'] as num?)?.toDouble() ?? 0;
   }
 
-  /// Every donor, for the picker's unfiltered fallback.
+  /// Every donor, for the picker's unfiltered fallback. Deleted donors are
+  /// excluded; use [findProfileById] to reach one whose history still matters.
   Future<List<Profile>> allProfiles({bool includeStaff = false}) async {
     final d = await db;
     final rows = await d.query(
       _profileTable,
-      where: includeStaff ? null : 'role = ?',
+      where: includeStaff ? 'is_deleted = 0' : 'role = ? AND is_deleted = 0',
       whereArgs: includeStaff ? null : [ProfileRole.member],
       orderBy: 'name_key ASC',
     );
