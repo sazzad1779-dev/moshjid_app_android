@@ -557,10 +557,21 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
     }
     final amount = double.parse(_amount.text.trim());
     final ex = widget.existing;
+
+    // Resolve the category uuid now rather than at sync time, so an offline or
+    // failed sync still leaves the row pointing at a real category. The lookup
+    // is keyed on (name, type) because names like "Other" and "Imam Hadiya"
+    // exist under both types.
+    String? categoryId = ex?.categoryId;
+    try {
+      categoryId = await LocalDb().resolveCategoryId(_category, _type) ?? categoryId;
+    } catch (_) {}
+
     final t = ex == null
         ? Txn.create(
             type: _type,
             category: _category,
+            categoryId: categoryId,
             amount: amount,
             paymentMethod: _method,
             enteredBy: enteredBy,
@@ -574,6 +585,7 @@ class _AddTxnSheetState extends State<AddTxnSheet> {
         : ex.applyEdit(
             type: _type,
             category: _category,
+            categoryId: categoryId,
             amount: amount,
             paymentMethod: _method,
             status: ex.status,

@@ -70,7 +70,7 @@ class SyncService {
     String? lastError;
     for (final t in pending) {
       try {
-        final catId = await local.resolveCategoryId(t.category);
+        final catId = await local.resolveCategoryId(t.category, t.type);
         // Upsert (not insert): covers new rows, edited rows, and
         // soft-deleted rows (is_deleted=true) in one path.
         await client.from('transactions').upsert(

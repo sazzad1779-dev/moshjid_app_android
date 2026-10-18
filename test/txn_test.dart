@@ -36,7 +36,7 @@ void main() {
     final m = t.toSupabaseMap();
     for (final k in [
       'id',
-      'type',
+      'category_id',
       'amount',
       'payment_method',
       'status',
@@ -48,6 +48,22 @@ void main() {
       expect(m.containsKey(k), true, reason: 'missing $k');
     }
     expect(m['is_deleted'], false);
+    // `type` was dropped from the server table; it is derived from
+    // transaction_categories.type via category_id.
+    expect(m.containsKey('type'), false,
+        reason: 'type must not be sent; it no longer exists on the server');
+  });
+
+  test('category_id is resolved from the selected category name', () {
+    final t = Txn.create(
+      type: 'income',
+      category: 'Regular Donation',
+      categoryId: '65454db0-77ad-4697-ae22-40d9d29f5320',
+      amount: 250,
+      paymentMethod: 'cash',
+      enteredBy: 'd1164f3c-47c7-4d5b-98ab-f8a190bd894d',
+    );
+    expect(t.toSupabaseMap()['category_id'], '65454db0-77ad-4697-ae22-40d9d29f5320');
   });
 
   test('edit preserves identity, resets sync state', () {

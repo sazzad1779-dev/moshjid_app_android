@@ -40,6 +40,7 @@ class Txn {
   factory Txn.create({
     required String type,
     required String category,
+    String? categoryId,
     required double amount,
     required String paymentMethod,
     required String enteredBy,
@@ -53,6 +54,7 @@ class Txn {
       id: const Uuid().v4(),
       type: type,
       category: category,
+      categoryId: categoryId,
       amount: amount,
       paymentMethod: paymentMethod,
       status: status,
@@ -71,6 +73,7 @@ class Txn {
   Txn applyEdit({
     required String type,
     required String category,
+    String? categoryId,
     required double amount,
     required String paymentMethod,
     required String status,
@@ -83,7 +86,7 @@ class Txn {
       id: id,
       type: type,
       category: category,
-      categoryId: categoryId,
+      categoryId: categoryId ?? this.categoryId,
       amount: amount,
       paymentMethod: paymentMethod,
       status: status,
@@ -155,11 +158,15 @@ class Txn {
       );
 
   /// Payload for Supabase `transactions` upsert.
+  ///
+  /// `type` is intentionally absent: the column was dropped from the server
+  /// table and is now derived from `transaction_categories.type` via
+  /// `category_id`. It is still kept locally so the list can colour and total
+  /// rows offline, before any category cache exists.
   Map<String, dynamic> toSupabaseMap({String? resolvedCategoryId}) {
     final now = DateTime.now().toUtc().toIso8601String();
     return {
       'id': id,
-      'type': type,
       'category_id': resolvedCategoryId ?? categoryId,
       'amount': amount,
       'payment_method': paymentMethod,

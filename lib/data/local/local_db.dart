@@ -25,7 +25,7 @@ class LocalDb {
     final path = p.join(dir, _dbName);
     _db = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (d, v) async {
         await d.execute('''
           CREATE TABLE $_txnTable(
@@ -47,6 +47,8 @@ class LocalDb {
         ''');
         await d.execute(
             'CREATE INDEX idx_txn_synced ON $_txnTable(synced_at)');
+        await d.execute(
+            'CREATE INDEX idx_txn_date ON $_txnTable(date DESC)');
         await d.execute('''
           CREATE TABLE $_catTable(
             id TEXT PRIMARY KEY,
@@ -59,6 +61,13 @@ class LocalDb {
         if (oldV < 2) {
           await d.execute(
               'ALTER TABLE $_txnTable ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0');
+        }
+        if (oldV < 3) {
+          await d.execute('CREATE INDEX IF NOT EXISTS idx_txn_date ON $_txnTable(date DESC)');
+          await d.execute(
+              'UPDATE $_txnTable SET category_id = (SELECT c.id FROM $_catTable c '
+              'WHERE c.name = $_txnTable.category AND c.type = $_txnTable.type) '
+              'WHERE category_id IS NULL');
         }
       },
     );
@@ -127,10 +136,16 @@ class LocalDb {
     return d.query(_catTable, where: 'type = ?', whereArgs: [type], orderBy: 'name ASC');
   }
 
-  Future<String?> resolveCategoryId(String name) async {
+  /// Resolves the server uuid for a category. The same name can exist under
+  /// more than one type (e.g. "Other" and "Imam Hadiya"), so [type] is part of
+  /// the lookup key -- matching on name alone returns an arbitrary row.
+  Future<String?> resolveCategoryId(String name, String type) async {
     final d = await db;
     final rows = await d.query(_catTable,
-        columns: ['id'], where: 'name = ?', whereArgs: [name], limit: 1);
+        columns: ['id'],
+        where: 'name = ? AND type = ?',
+        whereArgs: [name, type],
+        limit: 1);
     if (rows.isEmpty) return null;
     return rows.first['id'] as String?;
   }

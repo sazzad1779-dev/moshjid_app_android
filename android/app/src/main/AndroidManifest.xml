@@ -1,4 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Required for Supabase sync. Without this the release build silently
+         runs offline-only, because debug/profile manifests declare it
+         separately and do not get merged into a release build. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="moshjid_app"
         android:name="${applicationName}"
