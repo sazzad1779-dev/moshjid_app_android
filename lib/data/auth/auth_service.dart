@@ -19,10 +19,7 @@ class AuthService {
   String? get email => _client.auth.currentUser?.email;
 
   Future<void> signIn(String email, String password) async {
-    await _client.auth.signInWithPassword(
-      email: email.trim(),
-      password: password,
-    );
+    await _client.auth.signInWithPassword(email: email.trim(), password: password);
     // Refresh cached entered_by right after login.
     await resolveEnteredById(forceRefresh: true);
   }
@@ -90,7 +87,6 @@ class AuthService {
     final cached = p.getString(_enteredByCacheKey);
     if (cached != null && cached.isNotEmpty) return cached;
     throw StateError(
-      'No linked profile: set profiles.auth_user_id = $uid for the mosque user.',
-    );
+        'No linked profile: set profiles.auth_user_id = $uid for the mosque user.');
   }
 }

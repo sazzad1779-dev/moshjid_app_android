@@ -5,26 +5,17 @@
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class AppConfig {
-  static const _defineUrl = String.fromEnvironment(
-    'SUPABASE_URL',
-    defaultValue: '',
-  );
-  static const _defineKey = String.fromEnvironment(
-    'SUPABASE_ANON_KEY',
-    defaultValue: '',
-  );
-  static const _defineEnteredBy = String.fromEnvironment(
-    'ENTERED_BY_ID',
-    defaultValue: '',
-  );
-  static const _defineServiceEmail = String.fromEnvironment(
-    'SERVICE_EMAIL',
-    defaultValue: '',
-  );
+  static const _defineUrl = String.fromEnvironment('SUPABASE_URL',
+      defaultValue: '');
+  static const _defineKey = String.fromEnvironment('SUPABASE_ANON_KEY',
+      defaultValue: '');
+  static const _defineEnteredBy = String.fromEnvironment('ENTERED_BY_ID',
+      defaultValue: '');
+  static const _defineServiceEmail = String.fromEnvironment('SERVICE_EMAIL',
+      defaultValue: '');
   static const _defineServicePassword = String.fromEnvironment(
-    'SERVICE_PASSWORD',
-    defaultValue: '',
-  );
+      'SERVICE_PASSWORD',
+      defaultValue: '');
 
   static String get supabaseUrl {
     if (_defineUrl.isNotEmpty) return _defineUrl;
@@ -93,18 +84,26 @@ class AppConfig {
 
   // ---- Enum values (must match DB exactly) ----
   static const txnTypes = ['income', 'expense', 'other'];
-  static const paymentMethods = [
-    'cash',
-    'bkash',
-    'nagad',
-    'bank',
-    'card',
-    'other',
-  ];
+  static const paymentMethods = ['cash', 'bkash', 'nagad', 'bank', 'card', 'other'];
   static const defaultStatus = 'confirmed';
 
-  /// Category names live in `transaction_categories` and are cached in
-  /// `categories_cache` when online; the offline fallback list lives in
-  /// `AppCategories` (lib/data/repositories/txn_repository.dart) so the two
-  /// never drift.
+  /// Seeded categories (deduped from your list). When online the app
+  /// refreshes these from `transaction_categories` and caches them.
+  static const Map<String, List<String>> seedCategories = {
+    'income': [
+      'Monthly Due',
+      'General Donation',
+      'Friday Collection',
+      'Anonymous',
+      'Other Income',
+    ],
+    'expense': [
+      'Maintenance & Repair',
+      'Utility Bill',
+      'Imam / Staff Hadiya',
+      'Event / Program',
+      'Other Expense',
+    ],
+    'other': ['Other Income', 'Other Expense'],
+  };
 }

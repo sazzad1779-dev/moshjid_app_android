@@ -4,8 +4,6 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'config/app_config.dart';
 import 'data/auth/auth_service.dart';
-import 'data/repositories/txn_repository.dart';
-import 'ui/app_scope.dart';
 import 'ui/home_page.dart';
 import 'ui/pin_gate.dart';
 
@@ -38,39 +36,31 @@ Future<void> main() async {
       'Set SUPABASE_URL / SUPABASE_ANON_KEY in .env or --dart-define.',
     );
   }
-  runApp(MoshjidApp(repo: TxnRepository()));
+  runApp(const MoshjidApp());
 }
 
 class MoshjidApp extends StatefulWidget {
-  /// Built once in `main()` so every screen shares one database handle and
-  /// one sync service.
-  final TxnRepository? repo;
-
-  const MoshjidApp({super.key, this.repo});
+  const MoshjidApp({super.key});
 
   @override
   State<MoshjidApp> createState() => _MoshjidAppState();
 }
 
 class _MoshjidAppState extends State<MoshjidApp> {
-  late final TxnRepository _repo = widget.repo ?? TxnRepository();
   bool _unlocked = false;
 
   @override
   Widget build(BuildContext context) {
-    return AppScope(
-      repo: _repo,
-      child: MaterialApp(
-        title: 'Moshjid Transactions',
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
-          useMaterial3: true,
-        ),
-        // PIN is the only visible gate; Supabase auth happens silently.
-        home: _unlocked
-            ? const HomePage()
-            : PinGate(onUnlocked: () => setState(() => _unlocked = true)),
+    return MaterialApp(
+      title: 'Moshjid Transactions',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+        useMaterial3: true,
       ),
+      // PIN is the only visible gate; Supabase auth happens silently.
+      home: _unlocked
+          ? const HomePage()
+          : PinGate(onUnlocked: () => setState(() => _unlocked = true)),
     );
   }
 }
