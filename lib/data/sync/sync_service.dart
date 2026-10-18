@@ -75,10 +75,12 @@ class SyncService {
 
   Future<bool> get isOnline async {
     final res = await Connectivity().checkConnectivity();
-    return res.any((r) =>
-        r == ConnectivityResult.mobile ||
-        r == ConnectivityResult.wifi ||
-        r == ConnectivityResult.ethernet);
+    return res.any(
+      (r) =>
+          r == ConnectivityResult.mobile ||
+          r == ConnectivityResult.wifi ||
+          r == ConnectivityResult.ethernet,
+    );
   }
 
   /// Full sync: pull reference data, push local work, pull reference data again.
@@ -96,8 +98,8 @@ class SyncService {
       final ok = await AuthService().ensureSignedIn();
       if (!ok) {
         return const SyncResult(
-            error:
-                'Sync unavailable — service sign-in failed (offline or bad SERVICE_EMAIL/PASSWORD)');
+          error: 'Sync unavailable — service sign-in failed (offline or bad SERVICE_EMAIL/PASSWORD)',
+        );
       }
     }
     if (!await isOnline) {
@@ -146,11 +148,13 @@ class SyncService {
           .select('id,name,type')
           .eq('is_active', true);
       final cats = (rows as List)
-          .map((e) => {
-                'id': (e as Map)['id'],
-                'name': e['name'],
-                'type': e['type'],
-              })
+          .map(
+            (e) => {
+              'id': (e as Map)['id'],
+              'name': e['name'],
+              'type': e['type'],
+            },
+          )
           .toList();
       if (cats.isEmpty) return null;
       await local.cacheCategories(cats);
@@ -192,18 +196,20 @@ class SyncService {
   /// migration would take the entire donor picker down rather than just the
   /// phone numbers.
   Future<List<Map<String, dynamic>>> _selectAllProfiles(
-      SupabaseClient client) async {
+    SupabaseClient client,
+  ) async {
     const lean =
         'id,full_name,phone,role,status,is_monthly,is_deleted,client_created_at,created_at';
     try {
       return await _paged(
-          (from, to) => client.from('profiles').select(lean).range(from, to),
+        (from, to) => client.from('profiles').select(lean).range(from, to),
       );
     } on PostgrestException catch (e) {
       // 42703 = undefined_column
       if (e.code != '42703' && !e.message.contains('column')) rethrow;
       return await _paged(
-          (from, to) => client.from('profiles').select().range(from, to));
+        (from, to) => client.from('profiles').select().range(from, to),
+      );
     }
   }
 
@@ -211,7 +217,7 @@ class SyncService {
     Future<List<Map<String, dynamic>>> Function(int from, int to) page,
   ) async {
     final all = <Map<String, dynamic>>[];
-    for (var from = 0;; from += _pageSize) {
+    for (var from = 0; ; from += _pageSize) {
       final chunk = await page(from, from + _pageSize - 1);
       if (chunk.isEmpty) break;
       all.addAll(chunk);
@@ -254,9 +260,9 @@ class SyncService {
     final postgrest = RegExp(r"Could not find the '([A-Za-z_]\w*)' column")
         .firstMatch(message);
     if (postgrest != null) return postgrest.group(1);
-    final postgres =
-        RegExp(r"column\s+(?:[A-Za-z_][\w]*\.)?'?([A-Za-z_]\w*)'?\s+does not exist")
-            .firstMatch(message);
+    final postgres = RegExp(
+      r"column\s+(?:[A-Za-z_][\w]*\.)?'?([A-Za-z_]\w*)'?\s+does not exist",
+    ).firstMatch(message);
     return postgres?.group(1);
   }
 
@@ -342,8 +348,7 @@ class SyncService {
 
         // Ask first. This is the common case once another device or the Excel
         // import has already registered the donor.
-        final existing =
-            await _findRemoteByMatchKey(client, matchKey);
+        final existing = await _findRemoteByMatchKey(client, matchKey);
         if (existing != null) {
           await local.markProfileSynced(id: p.id, remoteId: existing);
           merged++;
@@ -394,7 +399,9 @@ class SyncService {
   /// Finds the server uuid for a donor identity, or null when the server has
   /// never seen them.
   Future<String?> _findRemoteByMatchKey(
-      SupabaseClient client, String matchKey) async {
+    SupabaseClient client,
+    String matchKey,
+  ) async {
     try {
       final rows = await client
           .from('profiles')
@@ -482,11 +489,11 @@ class SyncService {
       dynamic query = client
           .from('transactions')
           .select(
-              'id, category_id, amount, payment_method, status, description, receipt_number, date, entered_by, member_id, donor_name, donor_phone, created_at, updated_at, is_deleted, transaction_categories(id, name, type)')
+            'id, category_id, amount, payment_method, status, description, receipt_number, date, entered_by, member_id, donor_name, donor_phone, created_at, updated_at, is_deleted, transaction_categories(id, name, type)',
+          )
           .eq('is_deleted', false);
       if (startDate != null) {
-        query =
-            query.gte('date', startDate.toIso8601String().split('T')[0]);
+        query = query.gte('date', startDate.toIso8601String().split('T')[0]);
       }
       if (endDate != null) {
         query = query.lte('date', endDate.toIso8601String().split('T')[0]);
@@ -533,8 +540,10 @@ class SyncService {
         // soft-deleted rows (is_deleted=true) in one path.
         await client
             .from('transactions')
-            .upsert(buildPayload(t, categoryId: catId, donor: donor),
-                onConflict: 'id');
+            .upsert(
+              buildPayload(t, categoryId: catId, donor: donor),
+              onConflict: 'id',
+            );
         await local.markSynced(t.id, DateTime.now());
         ok++;
       } catch (e) {
@@ -545,11 +554,11 @@ class SyncService {
       }
     }
     return SyncResult(
-        pushed: ok,
-        failed: fail,
-        deferred: held,
-        error: lastError,
-      );
+      pushed: ok,
+      failed: fail,
+      deferred: held,
+      error: lastError,
+    );
   }
 
   /// Errors that will not fix themselves on a retry, so the queue should wait

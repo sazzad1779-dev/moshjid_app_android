@@ -36,7 +36,7 @@ class DashboardPage extends StatefulWidget {
 }
 
 class _DashboardPageState extends State<DashboardPage> {
-  final SyncService _sync = SyncService(LocalDb.instance);
+  late final SyncService _sync;
   List<Map<String, dynamic>> _cloudTxns = [];
   bool _loading = true;
   String? _loadError;
@@ -48,6 +48,7 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void initState() {
     super.initState();
+    _sync = SyncService(widget.local ?? LocalDb.instance);
     _load();
   }
 
@@ -95,11 +96,8 @@ class _DashboardPageState extends State<DashboardPage> {
           as String? ??
       'Unknown';
 
-  List<String> get _categories => _cloudTxns
-      .map(_categoryOf)
-      .toSet()
-      .toList()
-    ..sort();
+  List<String> get _categories =>
+      _cloudTxns.map(_categoryOf).toSet().toList()..sort();
 
   List<Map<String, dynamic>> get _visible {
     return _cloudTxns.where((t) {
@@ -142,9 +140,8 @@ class _DashboardPageState extends State<DashboardPage> {
       initialDateRange: _dateRange,
       builder: (context, child) => Theme(
         data: Theme.of(context).copyWith(
-          colorScheme: Theme.of(context).colorScheme.copyWith(
-                primary: Theme.of(context).colorScheme.primary,
-              ),
+          colorScheme: Theme.of(context).colorScheme
+              .copyWith(primary: Theme.of(context).colorScheme.primary),
         ),
         child: child!,
       ),
@@ -170,10 +167,7 @@ class _DashboardPageState extends State<DashboardPage> {
     final t = widget.pendingTxns;
     final m = widget.pendingMembers;
     if (t == 0 && m == 0) return 'Everything is synced';
-    final parts = [
-      if (t > 0) '$t transaction(s)',
-      if (m > 0) '$m member(s)',
-    ];
+    final parts = [if (t > 0) '$t transaction(s)', if (m > 0) '$m member(s)'];
     return '${parts.join(', ')} waiting to sync';
   }
 
@@ -221,94 +215,91 @@ class _DashboardPageState extends State<DashboardPage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _loadError != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.cloud_off, size: 48, color: Colors.grey),
+                    const SizedBox(height: 12),
+                    Text(
+                      _loadError!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.red),
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton(onPressed: _load, child: const Text('Retry')),
+                  ],
+                ),
+              ),
+            )
+          : RefreshIndicator(
+              onRefresh: () async {
+                await _load();
+                await widget.onDataChanged();
+              },
+              child: ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  _DateRangeRow(
+                    label: _dateRangeLabel,
+                    onTap: isOffline ? null : _pickDateRange,
+                    onClear: _dateRange != null ? _clearDateRange : null,
+                  ),
+                  if (isOffline)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        'Cloud data unavailable in offline mode',
+                        style: TextStyle(
+                          color: Colors.grey.shade600,
+                          fontSize: 12,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  const SizedBox(height: 16),
+                  _TotalsBar(income: _totalIncome, expense: _totalExpense),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    height: 40,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
                       children: [
-                        const Icon(Icons.cloud_off, size: 48, color: Colors.grey),
-                        const SizedBox(height: 12),
-                        Text(
-                          _loadError!,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: Colors.red),
-                        ),
-                        const SizedBox(height: 16),
-                        FilledButton(
-                          onPressed: _load,
-                          child: const Text('Retry'),
-                        ),
+                        for (final f in const [
+                          'all',
+                          'income',
+                          'expense',
+                          'other',
+                        ]) ...[
+                          Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: ChoiceChip(
+                              label: Text(
+                                f == 'all' ? 'All' : TxnTypeStyle.of(f).label,
+                              ),
+                              selected: _filter == f,
+                              onSelected: (_) => setState(() => _filter = f),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
-                )
-              : RefreshIndicator(
-                  onRefresh: () async {
-                    await _load();
-                    await widget.onDataChanged();
-                  },
-                  child: ListView(
-                    padding: const EdgeInsets.all(16),
-                    children: [
-                      _DateRangeRow(
-                        label: _dateRangeLabel,
-                        onTap: isOffline ? null : _pickDateRange,
-                        onClear: _dateRange != null ? _clearDateRange : null,
-                      ),
-                      if (isOffline)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Text(
-                            'Cloud data unavailable in offline mode',
-                            style: TextStyle(
-                              color: Colors.grey.shade600,
-                              fontSize: 12,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                      const SizedBox(height: 16),
-                      _TotalsBar(
-                        income: _totalIncome,
-                        expense: _totalExpense,
-                      ),
-                      const SizedBox(height: 16),
-                      SizedBox(
-                        height: 40,
-                        child: ListView(
-                          scrollDirection: Axis.horizontal,
-                          children: [
-                            for (final f in const [
-                              'all',
-                              'income',
-                              'expense',
-                              'other'
-                            ]) ...[
-                              Padding(
-                                padding: const EdgeInsets.only(right: 8),
-                                child: ChoiceChip(
-                                  label: Text(f == 'all'
-                                      ? 'All'
-                                      : TxnTypeStyle.of(f).label),
-                                  selected: _filter == f,
-                                  onSelected: (_) => setState(() => _filter = f),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      DropdownButtonFormField<String>(
+                  const SizedBox(height: 8),
+                  InputDecorator(
+                    decoration: const InputDecoration(
+                      labelText: 'Category',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        isExpanded: true,
                         value: _categories.contains(_categoryFilter)
                             ? _categoryFilter
                             : 'all',
-                        decoration: const InputDecoration(
-                          labelText: 'Category',
-                          border: OutlineInputBorder(),
-                          isDense: true,
-                        ),
                         items: [
                           const DropdownMenuItem(
                             value: 'all',
@@ -320,49 +311,52 @@ class _DashboardPageState extends State<DashboardPage> {
                               child: Text(category),
                             ),
                         ],
-                        onChanged: (value) => setState(
-                            () => _categoryFilter = value ?? 'all'),
+                        onChanged: (value) =>
+                            setState(() => _categoryFilter = value ?? 'all'),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  if (visible.isEmpty)
+                    _EmptyState(
+                      hasFilter:
+                          _dateRange != null ||
+                          _filter != 'all' ||
+                          _categoryFilter != 'all',
+                      isOffline: isOffline,
+                    )
+                  else ...[
+                    if (_categoryIncome.isNotEmpty) ...[
+                      _CategorySection(
+                        title: 'Income by Category',
+                        categories: _categoryIncome,
+                        color: TxnTypeStyle.of('income').color,
+                        fmt: fmt,
                       ),
                       const SizedBox(height: 16),
-                      if (visible.isEmpty)
-                        _EmptyState(
-                          hasFilter: _dateRange != null ||
-                              _filter != 'all' ||
-                              _categoryFilter != 'all',
-                          isOffline: isOffline,
-                        )
-                      else ...[
-                        if (_categoryIncome.isNotEmpty) ...[
-                          _CategorySection(
-                            title: 'Income by Category',
-                            categories: _categoryIncome,
-                            color: TxnTypeStyle.of('income').color,
-                            fmt: fmt,
-                          ),
-                          const SizedBox(height: 16),
-                        ],
-                        if (_categoryExpense.isNotEmpty) ...[
-                          _CategorySection(
-                            title: 'Expense by Category',
-                            categories: _categoryExpense,
-                            color: TxnTypeStyle.of('expense').color,
-                            fmt: fmt,
-                          ),
-                        ],
-                        if (_categoryOther.isNotEmpty) ...[
-                          _CategorySection(
-                            title: 'Other by Category',
-                            categories: _categoryOther,
-                            color: TxnTypeStyle.of('other').color,
-                            fmt: fmt,
-                          ),
-                        ],
-                        const SizedBox(height: 16),
-                        _TransactionsSection(transactions: visible),
-                      ],
                     ],
-                  ),
-                ),
+                    if (_categoryExpense.isNotEmpty) ...[
+                      _CategorySection(
+                        title: 'Expense by Category',
+                        categories: _categoryExpense,
+                        color: TxnTypeStyle.of('expense').color,
+                        fmt: fmt,
+                      ),
+                    ],
+                    if (_categoryOther.isNotEmpty) ...[
+                      _CategorySection(
+                        title: 'Other by Category',
+                        categories: _categoryOther,
+                        color: TxnTypeStyle.of('other').color,
+                        fmt: fmt,
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    _TransactionsSection(transactions: visible),
+                  ],
+                ],
+              ),
+            ),
     );
   }
 }
@@ -372,11 +366,7 @@ class _DateRangeRow extends StatelessWidget {
   final Future<void> Function()? onTap;
   final Future<void> Function()? onClear;
 
-  const _DateRangeRow({
-    required this.label,
-    this.onTap,
-    this.onClear,
-  });
+  const _DateRangeRow({required this.label, this.onTap, this.onClear});
 
   @override
   Widget build(BuildContext context) {
@@ -448,23 +438,30 @@ class _TotalsBar extends StatelessWidget {
     );
   }
 
-  Widget _cell(BuildContext context, String label, double v, Color c,
-      NumberFormat fmt) =>
-      Expanded(
-        child: Column(
-          children: [
-            Text(label,
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: Colors.grey.shade700)),
-            const SizedBox(height: 2),
-            Text(fmt.format(v),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.w700, color: c)),
-          ],
+  Widget _cell(
+    BuildContext context,
+    String label,
+    double v,
+    Color c,
+    NumberFormat fmt,
+  ) => Expanded(
+    child: Column(
+      children: [
+        Text(
+          label,
+          style: Theme.of(context).textTheme.labelMedium
+              ?.copyWith(color: Colors.grey.shade700),
         ),
-      );
+        const SizedBox(height: 2),
+        Text(
+          fmt.format(v),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: c),
+        ),
+      ],
+    ),
+  );
 }
 
 class _CategorySection extends StatelessWidget {
@@ -489,9 +486,13 @@ class _CategorySection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(title,
-            style: theme.textTheme.titleSmall?.copyWith(
-                fontWeight: FontWeight.w700, color: color)),
+        Text(
+          title,
+          style: theme.textTheme.titleSmall?.copyWith(
+            fontWeight: FontWeight.w700,
+            color: color,
+          ),
+        ),
         const SizedBox(height: 8),
         Card(
           child: Column(
@@ -500,21 +501,31 @@ class _CategorySection extends StatelessWidget {
                 if (i > 0) Divider(height: 1, indent: 16, endIndent: 16),
                 ListTile(
                   dense: true,
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 4,
+                  ),
                   leading: CircleAvatar(
                     radius: 16,
                     backgroundColor: color.withValues(alpha: 0.12),
-                    child: Icon(Icons.category_outlined,
-                        color: color, size: 16),
+                    child: Icon(
+                      Icons.category_outlined,
+                      color: color,
+                      size: 16,
+                    ),
                   ),
-                  title: Text(entries[i].key,
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
-                  trailing: Text(fmt.format(entries[i].value),
-                      style: TextStyle(
-                          fontWeight: FontWeight.w700,
-                          color: color,
-                          fontSize: 15)),
+                  title: Text(
+                    entries[i].key,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  trailing: Text(
+                    fmt.format(entries[i].value),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: color,
+                      fontSize: 15,
+                    ),
+                  ),
                 ),
               ],
             ],
@@ -539,9 +550,7 @@ class _TransactionsSection extends StatelessWidget {
       children: [
         Text(
           'Transactions (${transactions.length})',
-          style: Theme.of(context)
-              .textTheme
-              .titleSmall
+          style: Theme.of(context).textTheme.titleSmall
               ?.copyWith(fontWeight: FontWeight.w700),
         ),
         const SizedBox(height: 8),
@@ -550,41 +559,49 @@ class _TransactionsSection extends StatelessWidget {
             children: [
               for (var i = 0; i < transactions.length; i++) ...[
                 if (i > 0) const Divider(height: 1, indent: 16, endIndent: 16),
-                Builder(builder: (context) {
-                  final txn = transactions[i];
-                  final type = (txn['transaction_categories']
-                          as Map<String, dynamic>?)?['type'] as String? ??
-                      'other';
-                  final category = (txn['transaction_categories']
-                          as Map<String, dynamic>?)?['name'] as String? ??
-                      'Unknown';
-                  final date = DateTime.tryParse('${txn['date'] ?? ''}');
-                  final amount = (txn['amount'] as num?)?.toDouble() ?? 0;
-                  final color = TxnTypeStyle.of(type).color;
-                  return ListTile(
-                    dense: true,
-                    leading: CircleAvatar(
-                      radius: 16,
-                      backgroundColor: color.withValues(alpha: 0.12),
-                      child: Icon(
-                        TxnTypeStyle.of(type).icon,
-                        color: color,
-                        size: 16,
+                Builder(
+                  builder: (context) {
+                    final txn = transactions[i];
+                    final type =
+                        (txn['transaction_categories']
+                                as Map<String, dynamic>?)?['type']
+                            as String? ??
+                        'other';
+                    final category =
+                        (txn['transaction_categories']
+                                as Map<String, dynamic>?)?['name']
+                            as String? ??
+                        'Unknown';
+                    final date = DateTime.tryParse('${txn['date'] ?? ''}');
+                    final amount = (txn['amount'] as num?)?.toDouble() ?? 0;
+                    final color = TxnTypeStyle.of(type).color;
+                    return ListTile(
+                      dense: true,
+                      leading: CircleAvatar(
+                        radius: 16,
+                        backgroundColor: color.withValues(alpha: 0.12),
+                        child: Icon(
+                          TxnTypeStyle.of(type).icon,
+                          color: color,
+                          size: 16,
+                        ),
                       ),
-                    ),
-                    title: Text(category),
-                    subtitle: Text(
-                      '${TxnTypeStyle.of(type).label}'
-                      '${date == null ? '' : ' • ${dateFmt.format(date)}'}'
-                      '${txn['receipt_number'] == null ? '' : ' • ${txn['receipt_number']}'}',
-                    ),
-                    trailing: Text(
-                      fmt.format(amount),
-                      style: TextStyle(
-                          fontWeight: FontWeight.w700, color: color),
-                    ),
-                  );
-                }),
+                      title: Text(category),
+                      subtitle: Text(
+                        '${TxnTypeStyle.of(type).label}'
+                        '${date == null ? '' : ' • ${dateFmt.format(date)}'}'
+                        '${txn['receipt_number'] == null ? '' : ' • ${txn['receipt_number']}'}',
+                      ),
+                      trailing: Text(
+                        fmt.format(amount),
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: color,
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ],
             ],
           ),
@@ -608,8 +625,8 @@ class _EmptyState extends StatelessWidget {
           isOffline
               ? 'Cloud data unavailable in offline mode.\nConfigure Supabase to view dashboard.'
               : hasFilter
-                  ? 'No transactions match these filters.'
-                  : 'No cloud transactions found.',
+              ? 'No transactions match these filters.'
+              : 'No cloud transactions found.',
           textAlign: TextAlign.center,
           style: const TextStyle(color: Colors.grey),
         ),
