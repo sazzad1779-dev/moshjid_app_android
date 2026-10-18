@@ -8,9 +8,9 @@ import 'widgets/type_selector.dart';
 
 /// Dashboard: summary totals, date-range filter, category breakdown.
 ///
-/// Reads the local database on every [revision] change. When offline, the
-/// cached data is shown. No network call is made here; sync is handled by
-/// the shell.
+/// Reads the cloud transaction table on every [revision] change. Sync is
+/// handled by the shell; the dashboard intentionally displays server records
+/// only, not transactions that are still local and unsynced.
 class DashboardPage extends StatefulWidget {
   final int revision;
   final bool syncing;
@@ -37,13 +37,13 @@ class DashboardPage extends StatefulWidget {
 
 class _DashboardPageState extends State<DashboardPage> {
   final SyncService _sync = SyncService(LocalDb.instance);
-
   List<Map<String, dynamic>> _cloudTxns = [];
   bool _loading = true;
   String? _loadError;
 
   DateTimeRange? _dateRange;
   String _filter = 'all';
+  String _categoryFilter = 'all';
 
   @override
   void initState() {
@@ -71,57 +71,67 @@ class _DashboardPageState extends State<DashboardPage> {
       setState(() {
         _cloudTxns = rows ?? [];
         _loading = false;
+        _loadError = rows == null
+            ? 'Cloud data is unavailable. Check your connection and Supabase configuration.'
+            : null;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _cloudTxns = [];
         _loading = false;
-        _loadError = 'Failed to load from cloud: $e';
+        _loadError = 'Failed to load transactions from cloud: $e';
       });
     }
   }
 
+  String _typeOf(Map<String, dynamic> txn) =>
+      (txn['transaction_categories'] as Map<String, dynamic>?)?['type']
+          as String? ??
+      'other';
+
+  String _categoryOf(Map<String, dynamic> txn) =>
+      (txn['transaction_categories'] as Map<String, dynamic>?)?['name']
+          as String? ??
+      'Unknown';
+
+  List<String> get _categories => _cloudTxns
+      .map(_categoryOf)
+      .toSet()
+      .toList()
+    ..sort();
+
   List<Map<String, dynamic>> get _visible {
     return _cloudTxns.where((t) {
-      final type = t['transaction_categories']?['type'] ?? t['type'] ?? 'other';
-      if (_filter != 'all' && type != _filter) return false;
+      if (_filter != 'all' && _typeOf(t) != _filter) return false;
+      if (_categoryFilter != 'all' && _categoryOf(t) != _categoryFilter) {
+        return false;
+      }
       return true;
     }).toList();
   }
 
-  Map<String, double> get _categoryIncome {
+  Map<String, double> _categoryTotalsFor(String type) {
     final map = <String, double>{};
     for (final t in _visible) {
-      final cat = t['transaction_categories']?['name'] ?? t['category'] ?? 'Unknown';
-      final type = t['transaction_categories']?['type'] ?? t['type'] ?? 'other';
+      if (_typeOf(t) != type) continue;
+      final category = _categoryOf(t);
       final amount = (t['amount'] as num?)?.toDouble() ?? 0;
-      if (type == 'income') {
-        map[cat] = (map[cat] ?? 0) + amount;
-      }
+      map[category] = (map[category] ?? 0) + amount;
     }
     return map;
   }
 
-  Map<String, double> get _categoryExpense {
-    final map = <String, double>{};
-    for (final t in _visible) {
-      final cat = t['transaction_categories']?['name'] ?? t['category'] ?? 'Unknown';
-      final type = t['transaction_categories']?['type'] ?? t['type'] ?? 'other';
-      final amount = (t['amount'] as num?)?.toDouble() ?? 0;
-      if (type == 'expense') {
-        map[cat] = (map[cat] ?? 0) + amount;
-      }
-    }
-    return map;
-  }
+  Map<String, double> get _categoryIncome => _categoryTotalsFor('income');
+  Map<String, double> get _categoryExpense => _categoryTotalsFor('expense');
+  Map<String, double> get _categoryOther => _categoryTotalsFor('other');
 
   double get _totalIncome => _visible
-      .where((t) => (t['transaction_categories']?['type'] ?? t['type'] ?? 'other') == 'income')
+      .where((t) => _typeOf(t) == 'income')
       .fold(0, (s, t) => s + ((t['amount'] as num?)?.toDouble() ?? 0));
 
   double get _totalExpense => _visible
-      .where((t) => (t['transaction_categories']?['type'] ?? t['type'] ?? 'other') == 'expense')
+      .where((t) => _typeOf(t) == 'expense')
       .fold(0, (s, t) => s + ((t['amount'] as num?)?.toDouble() ?? 0));
 
   Future<void> _pickDateRange() async {
@@ -269,7 +279,12 @@ class _DashboardPageState extends State<DashboardPage> {
                         child: ListView(
                           scrollDirection: Axis.horizontal,
                           children: [
-                            for (final f in const ['all', 'income', 'expense']) ...[
+                            for (final f in const [
+                              'all',
+                              'income',
+                              'expense',
+                              'other'
+                            ]) ...[
                               Padding(
                                 padding: const EdgeInsets.only(right: 8),
                                 child: ChoiceChip(
@@ -284,10 +299,36 @@ class _DashboardPageState extends State<DashboardPage> {
                           ],
                         ),
                       ),
+                      const SizedBox(height: 8),
+                      DropdownButtonFormField<String>(
+                        value: _categories.contains(_categoryFilter)
+                            ? _categoryFilter
+                            : 'all',
+                        decoration: const InputDecoration(
+                          labelText: 'Category',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        items: [
+                          const DropdownMenuItem(
+                            value: 'all',
+                            child: Text('All categories'),
+                          ),
+                          for (final category in _categories)
+                            DropdownMenuItem(
+                              value: category,
+                              child: Text(category),
+                            ),
+                        ],
+                        onChanged: (value) => setState(
+                            () => _categoryFilter = value ?? 'all'),
+                      ),
                       const SizedBox(height: 16),
                       if (visible.isEmpty)
                         _EmptyState(
-                          hasFilter: _dateRange != null || _filter != 'all',
+                          hasFilter: _dateRange != null ||
+                              _filter != 'all' ||
+                              _categoryFilter != 'all',
                           isOffline: isOffline,
                         )
                       else ...[
@@ -308,6 +349,16 @@ class _DashboardPageState extends State<DashboardPage> {
                             fmt: fmt,
                           ),
                         ],
+                        if (_categoryOther.isNotEmpty) ...[
+                          _CategorySection(
+                            title: 'Other by Category',
+                            categories: _categoryOther,
+                            color: TxnTypeStyle.of('other').color,
+                            fmt: fmt,
+                          ),
+                        ],
+                        const SizedBox(height: 16),
+                        _TransactionsSection(transactions: visible),
                       ],
                     ],
                   ),
@@ -474,6 +525,75 @@ class _CategorySection extends StatelessWidget {
   }
 }
 
+class _TransactionsSection extends StatelessWidget {
+  final List<Map<String, dynamic>> transactions;
+
+  const _TransactionsSection({required this.transactions});
+
+  @override
+  Widget build(BuildContext context) {
+    final fmt = NumberFormat('#,##0.##');
+    final dateFmt = DateFormat('d MMM yyyy');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Transactions (${transactions.length})',
+          style: Theme.of(context)
+              .textTheme
+              .titleSmall
+              ?.copyWith(fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 8),
+        Card(
+          child: Column(
+            children: [
+              for (var i = 0; i < transactions.length; i++) ...[
+                if (i > 0) const Divider(height: 1, indent: 16, endIndent: 16),
+                Builder(builder: (context) {
+                  final txn = transactions[i];
+                  final type = (txn['transaction_categories']
+                          as Map<String, dynamic>?)?['type'] as String? ??
+                      'other';
+                  final category = (txn['transaction_categories']
+                          as Map<String, dynamic>?)?['name'] as String? ??
+                      'Unknown';
+                  final date = DateTime.tryParse('${txn['date'] ?? ''}');
+                  final amount = (txn['amount'] as num?)?.toDouble() ?? 0;
+                  final color = TxnTypeStyle.of(type).color;
+                  return ListTile(
+                    dense: true,
+                    leading: CircleAvatar(
+                      radius: 16,
+                      backgroundColor: color.withValues(alpha: 0.12),
+                      child: Icon(
+                        TxnTypeStyle.of(type).icon,
+                        color: color,
+                        size: 16,
+                      ),
+                    ),
+                    title: Text(category),
+                    subtitle: Text(
+                      '${TxnTypeStyle.of(type).label}'
+                      '${date == null ? '' : ' • ${dateFmt.format(date)}'}'
+                      '${txn['receipt_number'] == null ? '' : ' • ${txn['receipt_number']}'}',
+                    ),
+                    trailing: Text(
+                      fmt.format(amount),
+                      style: TextStyle(
+                          fontWeight: FontWeight.w700, color: color),
+                    ),
+                  );
+                }),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _EmptyState extends StatelessWidget {
   final bool hasFilter;
   final bool isOffline;
@@ -488,8 +608,8 @@ class _EmptyState extends StatelessWidget {
           isOffline
               ? 'Cloud data unavailable in offline mode.\nConfigure Supabase to view dashboard.'
               : hasFilter
-                  ? 'No transactions in this range.'
-                  : 'No transactions yet.\nAdd some from the Transactions tab.',
+                  ? 'No transactions match these filters.'
+                  : 'No cloud transactions found.',
           textAlign: TextAlign.center,
           style: const TextStyle(color: Colors.grey),
         ),

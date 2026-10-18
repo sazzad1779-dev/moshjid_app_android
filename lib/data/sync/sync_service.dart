@@ -461,8 +461,11 @@ class SyncService {
 
   /// Pulls transactions from the cloud (Supabase).
   ///
-  /// Optional date range filtering. Returns transactions with joined category
-  /// and donor info. When offline or not configured, returns null.
+  /// Optional date range filtering. Returns all non-deleted transactions with
+  /// joined category and donor info, paging past PostgREST's response limit.
+  /// When offline or not configured, returns null. Query failures are allowed
+  /// to reach the caller so the UI can report them instead of showing an empty
+  /// success state.
   Future<List<Map<String, dynamic>>?> pullTransactions({
     DateTime? startDate,
     DateTime? endDate,
@@ -475,26 +478,27 @@ class SyncService {
     }
     if (!await isOnline) return null;
 
-    try {
-      var query = client
+    return _paged((from, to) async {
+      dynamic query = client
           .from('transactions')
           .select(
-              'id, category_id, amount, payment_method, status, description, receipt_number, date, entered_by, member_id, donor_name, donor_phone, created_at, updated_at, is_deleted, transaction_categories!inner(id, name, type)');
-
+              'id, category_id, amount, payment_method, status, description, receipt_number, date, entered_by, member_id, donor_name, donor_phone, created_at, updated_at, is_deleted, transaction_categories(id, name, type)')
+          .eq('is_deleted', false);
       if (startDate != null) {
-        query = query.gte('date', startDate.toIso8601String().split('T')[0]) as dynamic;
+        query =
+            query.gte('date', startDate.toIso8601String().split('T')[0]);
       }
       if (endDate != null) {
-        query = query.lte('date', endDate.toIso8601String().split('T')[0]) as dynamic;
+        query = query.lte('date', endDate.toIso8601String().split('T')[0]);
       }
-
-      query = query.order('date', ascending: false).order('created_at', ascending: false) as dynamic;
-
-      final rows = await query.limit(1000);
+      query = query
+          .order('date', ascending: false)
+          .order('created_at', ascending: false)
+          .order('id', ascending: true)
+          .range(from, to);
+      final rows = await query;
       return (rows as List).cast<Map<String, dynamic>>();
-    } catch (_) {
-      return null;
-    }
+    });
   }
 
   /// Pushes pending transactions. Donors must already be pushed.
