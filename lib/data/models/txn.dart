@@ -14,6 +14,20 @@ class Txn {
   final String? receiptNumber;
   final DateTime date; // date-only (yyyy-MM-dd)
   final String enteredBy;
+
+  /// `profiles.id` of the donor, for monthly-giver categories.
+  ///
+  /// May point at a profile that only exists on this device yet. [SyncService]
+  /// pushes profiles first, then rewrites this to the canonical server id before
+  /// the transaction goes up, so the server never sees a dangling member_id.
+  final String? memberId;
+
+  /// Denormalised from [memberId]'s profile. Kept on the row because the
+  /// server-side importer populates `transactions.donor_name` directly from
+  /// Excel, and reports read it without a join.
+  final String? donorName;
+  final String? donorPhone;
+
   final DateTime clientCreatedAt;
   final DateTime? syncedAt;
   final bool isDeleted;
@@ -30,12 +44,17 @@ class Txn {
     this.receiptNumber,
     required this.date,
     required this.enteredBy,
+    this.memberId,
+    this.donorName,
+    this.donorPhone,
     required this.clientCreatedAt,
     this.syncedAt,
     this.isDeleted = false,
   });
 
   bool get isSynced => syncedAt != null;
+
+  bool get hasDonor => memberId != null || (donorName?.trim().isNotEmpty ?? false);
 
   factory Txn.create({
     required String type,
@@ -48,6 +67,9 @@ class Txn {
     String? description,
     String? receiptNumber,
     DateTime? date,
+    String? memberId,
+    String? donorName,
+    String? donorPhone,
   }) {
     final now = DateTime.now();
     return Txn(
@@ -64,6 +86,9 @@ class Txn {
           : receiptNumber!.trim(),
       date: DateTime((date ?? now).year, (date ?? now).month, (date ?? now).day),
       enteredBy: enteredBy,
+      memberId: memberId,
+      donorName: (donorName?.trim().isEmpty ?? true) ? null : donorName!.trim(),
+      donorPhone: (donorPhone?.trim().isEmpty ?? true) ? null : donorPhone!.trim(),
       clientCreatedAt: now,
     );
   }
@@ -81,6 +106,9 @@ class Txn {
     String? receiptNumber,
     required DateTime date,
     required String enteredBy,
+    String? memberId,
+    String? donorName,
+    String? donorPhone,
   }) {
     return Txn(
       id: id,
@@ -97,11 +125,14 @@ class Txn {
           : receiptNumber!.trim(),
       date: DateTime(date.year, date.month, date.day),
       enteredBy: enteredBy,
+      memberId: memberId ?? this.memberId,
+      donorName: (donorName?.trim().isEmpty ?? true) ? null : donorName!.trim(),
+      donorPhone: (donorPhone?.trim().isEmpty ?? true) ? null : donorPhone!.trim(),
       clientCreatedAt: clientCreatedAt,
       syncedAt: null,
     );
   }
-  /// server still enforces UNIQUE so clashes surface on sync).
+
   /// Offline-safe receipt: R-YYYYMMDD-HHMMSS-xxxx (unique enough for v1,
   /// server still enforces UNIQUE so clashes surface on sync).
   static String generateReceiptNumber([DateTime? now]) {
@@ -133,6 +164,9 @@ class Txn {
             '${date.month.toString().padLeft(2, '0')}-'
             '${date.day.toString().padLeft(2, '0')}',
         'entered_by': enteredBy,
+        'member_id': memberId,
+        'donor_name': donorName,
+        'donor_phone': donorPhone,
         'client_created_at': clientCreatedAt.toIso8601String(),
         'synced_at': syncedAt?.toIso8601String(),
         'is_deleted': isDeleted ? 1 : 0,
@@ -150,6 +184,9 @@ class Txn {
         receiptNumber: m['receipt_number'] as String?,
         date: DateTime.parse(m['date'] as String),
         enteredBy: m['entered_by'] as String,
+        memberId: m['member_id'] as String?,
+        donorName: m['donor_name'] as String?,
+        donorPhone: m['donor_phone'] as String?,
         clientCreatedAt: DateTime.parse(m['client_created_at'] as String),
         syncedAt: m['synced_at'] == null
             ? null
@@ -163,11 +200,22 @@ class Txn {
   /// table and is now derived from `transaction_categories.type` via
   /// `category_id`. It is still kept locally so the list can colour and total
   /// rows offline, before any category cache exists.
-  Map<String, dynamic> toSupabaseMap({String? resolvedCategoryId}) {
+  ///
+  /// [memberId] is passed in rather than read from the row because a donor
+  /// created offline holds a local uuid that only becomes a real profile id once
+  /// `pushProfiles` has run. Sending the local id here would create a dangling
+  /// reference server-side.
+  Map<String, dynamic> toSupabaseMap({
+    String? resolvedCategoryId,
+    String? resolvedMemberId,
+  }) {
     final now = DateTime.now().toUtc().toIso8601String();
     return {
       'id': id,
       'category_id': resolvedCategoryId ?? categoryId,
+      'member_id': resolvedMemberId ?? memberId,
+      'donor_name': donorName,
+      'donor_phone': donorPhone,
       'amount': amount,
       'payment_method': paymentMethod,
       'status': status,

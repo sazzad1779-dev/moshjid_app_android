@@ -87,23 +87,41 @@ class AppConfig {
   static const paymentMethods = ['cash', 'bkash', 'nagad', 'bank', 'card', 'other'];
   static const defaultStatus = 'confirmed';
 
-  /// Seeded categories (deduped from your list). When online the app
-  /// refreshes these from `transaction_categories` and caches them.
+  /// Offline fallback for the category picker, used only until the first
+  /// successful `refreshCategories()` populates the local cache.
+  ///
+  /// Must stay in lockstep with `CANONICAL` in `tools/sync_categories.py` --
+  /// these are the same categories, split by type. Names differ from the server
+  /// and `resolveCategoryId` returns null, so the transaction lands without a
+  /// `category_id` until the next pull.
   static const Map<String, List<String>> seedCategories = {
     'income': [
-      'Monthly Due',
-      'General Donation',
       'Friday Collection',
-      'Anonymous',
-      'Other Income',
+      'Regular Donation',
+      'Magrib Donation',
+      'Donation (Outside Box)',
+      'Imam Hadiya',
+      'Other',
     ],
     'expense': [
-      'Maintenance & Repair',
-      'Utility Bill',
-      'Imam / Staff Hadiya',
-      'Event / Program',
-      'Other Expense',
+      'Electricity Bill',
+      'Imam Hadiya',
+      'Maintenance',
+      'Other',
     ],
     'other': ['Other Income', 'Other Expense'],
   };
+
+  /// Categories whose rows are attributed to a named donor.
+  ///
+  /// Keyed on (name, type), never name alone: "Imam Hadiya" exists under both
+  /// types and only the income side has donors. The income side is money coming
+  /// in from monthly givers; the expense side is the imam's own payout and has
+  /// nobody to attribute. Must stay in lockstep with `DONOR_CATEGORIES` in
+  /// `tools/sync_categories.py`.
+  static const Set<String> donorCategories = {'Imam Hadiya|income'};
+
+  /// Whether a transaction in this category should offer the donor picker.
+  static bool categoryTakesDonor(String name, String type) =>
+      donorCategories.contains('$name|$type');
 }

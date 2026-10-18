@@ -4,7 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'config/app_config.dart';
 import 'data/auth/auth_service.dart';
-import 'ui/home_page.dart';
+import 'ui/app_shell.dart';
 import 'ui/pin_gate.dart';
 
 Future<void> main() async {
@@ -54,12 +54,17 @@ class _MoshjidAppState extends State<MoshjidApp> {
     return MaterialApp(
       title: 'Moshjid Transactions',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF00695C)),
         useMaterial3: true,
+        inputDecorationTheme: const InputDecorationTheme(
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        appBarTheme: const AppBarTheme(centerTitle: false),
       ),
       // PIN is the only visible gate; Supabase auth happens silently.
       home: _unlocked
-          ? const HomePage()
+          ? const AppShell()
           : PinGate(onUnlocked: () => setState(() => _unlocked = true)),
     );
   }
