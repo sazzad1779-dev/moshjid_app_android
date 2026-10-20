@@ -101,6 +101,8 @@ class AppConfig {
       'Magrib Donation',
       'Donation (Outside Box)',
       'Imam Hadiya',
+      'Electricity Bill',
+      'Maintenance',
       'Other',
     ],
     'expense': [

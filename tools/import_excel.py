@@ -48,9 +48,13 @@ CATEGORY_MAP_OVERRIDE = {
 # Some Excel categories exist under both income and expense. Route each to the
 # category row whose type matches the sheet's own type column, so a genuine
 # "Income / Imam Salary" row lands on Imam Hadiya (income) while an
-# "Expense / Imam Salary" row stays on Imam Hadiya (expense).
+# "Expense / Imam Salary" row stays on Imam Hadiya (expense). The ledger also
+# records donations earmarked for the electricity bill and maintenance, which
+# must keep their Income type instead of flipping to the expense category.
 CATEGORY_TYPE_AWARE = {
     ("imam salary", "income"): ("Imam Hadiya", "income"),
+    ("electricity bill", "income"): ("Electricity Bill", "income"),
+    ("maintenance", "income"): ("Maintenance", "income"),
 }
 
 CONFLICT_DEFAULT = ("Regular Donation", "income")

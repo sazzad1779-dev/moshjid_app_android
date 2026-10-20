@@ -24,17 +24,36 @@ BACKUP_DIR = ROOT / "tools" / "_backup"
 TABLE = "transaction_categories"
 TXN_TABLE = "transactions"
 
+# (type, name, bangla). A category name may legitimately appear under more than
+# one type: "Imam Hadiya" is money coming IN from monthly donors (81 rows in the
+# ledger) and money going OUT to the imam (5 rows). The ledger also collects
+# donations earmarked for the electricity bill and maintenance, so those purposes
+# need an income row as well as an expense row. They are separate categories
+# with separate ids, and lookups must always key on (name, type) -- matching on
+# name alone returns an arbitrary one of the two.
 CANONICAL = [
     ("income", "Friday Collection", "জুমার দান"),
     ("income", "Regular Donation", "নিয়মিত দান"),
     ("income", "Magrib Donation", "মাগরিব দান"),
     ("income", "Donation (Outside Box)", "বাহিরের দানবাক্স"),
+    # The donor side of the imam arrangement. These rows carry donor_name and
+    # transactions.member_id -- see tools/link_donor_profiles.py.
+    ("income", "Imam Hadiya", "ইমামের হাদিয়া (জমা)"),
+    # Donations collected for a specific purpose: the money comes in now and is
+    # spent later, so the income and expense sides are separate rows.
+    ("income", "Electricity Bill", "বিদ্যুৎ বিল (জমা)"),
+    ("income", "Maintenance", "রক্ষণাবেক্ষণ (জমা)"),
     ("income", "Other", "অন্যান্য"),
     ("expense", "Electricity Bill", "বিদ্যুৎ বিল"),
-    ("expense", "Imam Hadiya", "ইমামের হাদিয়া"),
+    # The payout side: what the imam is actually paid. No donor.
+    ("expense", "Imam Hadiya", "ইমামের হাদিয়া (খরচ)"),
     ("expense", "Maintenance", "রক্ষণাবেক্ষণ"),
     ("expense", "Other", "অন্যান্য"),
 ]
+
+# Categories whose rows belong to a named donor. Matched on (name, type), not
+# name alone, so the expense-side Imam Hadiya never picks up a donor.
+DONOR_CATEGORIES = {("Imam Hadiya", "income")}
 
 FK_CANDIDATES = ["category_id", "category_uuid", "category_fk", "category"]
 
@@ -265,7 +284,7 @@ def apply_plan(supa, plan):
             else:
                 hint = "\n  Unexpected error; nothing was committed."
             sys.exit(f"Insert failed for {row['name']} ({r.status_code}): {r.text[:400]}{hint}")
-        created[row["name"]] = r.json()[0]["id"]
+        created[(row["name"], row["type"])] = r.json()[0]["id"]
         print(f"  inserted {row['name']} [{row['type']}] -> {r.json()[0]['id']}")
 
     for row in plan["reactivate"]:

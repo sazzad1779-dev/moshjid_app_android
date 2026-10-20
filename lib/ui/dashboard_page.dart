@@ -6,6 +6,14 @@ import '../data/local/local_db.dart';
 import '../data/sync/sync_service.dart';
 import 'widgets/type_selector.dart';
 
+/// A category as the dashboard keys it.
+///
+/// The server owns categories: a transaction carries `category_id`, and the
+/// joined `transaction_categories` row supplies the name and type. The id is
+/// the identity, so two categories that share a name ("Imam Hadiya" exists
+/// under both income and expense) never collapse into one another.
+typedef _CategoryKey = ({String id, String name, String type});
+
 /// Dashboard: summary totals, date-range filter, category breakdown.
 ///
 /// Reads the cloud transaction table on every [revision] change. Sync is
@@ -20,6 +28,9 @@ class DashboardPage extends StatefulWidget {
   final Future<void> Function() onDataChanged;
   final LocalDb? local;
 
+  /// Test seam; the app leaves this null and builds its own [SyncService].
+  final SyncService? sync;
+
   const DashboardPage({
     super.key,
     required this.revision,
@@ -29,6 +40,7 @@ class DashboardPage extends StatefulWidget {
     required this.onSync,
     required this.onDataChanged,
     this.local,
+    this.sync,
   });
 
   @override
@@ -43,12 +55,12 @@ class _DashboardPageState extends State<DashboardPage> {
 
   DateTimeRange? _dateRange;
   String _filter = 'all';
-  String _categoryFilter = 'all';
+  _CategoryKey? _categoryFilter;
 
   @override
   void initState() {
     super.initState();
-    _sync = SyncService(widget.local ?? LocalDb.instance);
+    _sync = widget.sync ?? SyncService(widget.local ?? LocalDb.instance);
     _load();
   }
 
@@ -86,24 +98,89 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
+  Map<String, dynamic>? _categoryRowOf(Map<String, dynamic> txn) =>
+      txn['transaction_categories'] as Map<String, dynamic>?;
+
+  /// The category id is the foreign key on the transaction; fall back to the
+  /// joined row's id for rows that predate the column.
+  String _categoryIdOf(Map<String, dynamic> txn) =>
+      (txn['category_id'] as String?) ?? (_categoryRowOf(txn)?['id'] as String?) ?? '';
+
   String _typeOf(Map<String, dynamic> txn) =>
-      (txn['transaction_categories'] as Map<String, dynamic>?)?['type']
-          as String? ??
-      'other';
+      _categoryRowOf(txn)?['type'] as String? ?? 'other';
 
   String _categoryOf(Map<String, dynamic> txn) =>
-      (txn['transaction_categories'] as Map<String, dynamic>?)?['name']
-          as String? ??
-      'Unknown';
+      _categoryRowOf(txn)?['name'] as String? ?? 'Unknown';
 
-  List<String> get _categories =>
-      _cloudTxns.map(_categoryOf).toSet().toList()..sort();
+  _CategoryKey _categoryKeyOf(Map<String, dynamic> txn) => (
+    id: _categoryIdOf(txn),
+    name: _categoryOf(txn),
+    type: _typeOf(txn),
+  );
+
+  /// Category names that appear under more than one type. Their labels need the
+  /// type alongside the name or the picker shows two identical entries.
+  Set<String> get _sharedCategoryNames {
+    final typesByName = <String, Set<String>>{};
+    for (final txn in _cloudTxns) {
+      typesByName
+          .putIfAbsent(_categoryOf(txn), () => <String>{})
+          .add(_typeOf(txn));
+    }
+    return {
+      for (final entry in typesByName.entries)
+        if (entry.value.length > 1) entry.key,
+    };
+  }
+
+  /// Categories matching the current type chip, deduplicated by category id.
+  List<_CategoryKey> get _categories {
+    final byId = <String, _CategoryKey>{};
+    for (final txn in _cloudTxns) {
+      final key = _categoryKeyOf(txn);
+      if (_filter != 'all' && key.type != _filter) continue;
+      final identity = key.id.isNotEmpty ? key.id : '${key.name}\u0000${key.type}';
+      byId.putIfAbsent(identity, () => key);
+    }
+    final list = byId.values.toList()
+      ..sort((a, b) {
+        final byName = a.name.compareTo(b.name);
+        if (byName != 0) return byName;
+        final byType = a.type.compareTo(b.type);
+        return byType != 0 ? byType : a.id.compareTo(b.id);
+      });
+    return list;
+  }
+
+  /// The selected category, unless the current data/type filter no longer
+  /// offers it.
+  _CategoryKey? get _effectiveCategoryFilter {
+    final selected = _categoryFilter;
+    if (selected == null) return null;
+    for (final category in _categories) {
+      final matches = selected.id.isNotEmpty
+          ? category.id == selected.id
+          : category.name == selected.name && category.type == selected.type;
+      if (matches) return category;
+    }
+    return null;
+  }
+
+  String _categoryLabel(_CategoryKey key) {
+    if (!_sharedCategoryNames.contains(key.name)) return key.name;
+    return '${key.name} (${TxnTypeStyle.of(key.type).label})';
+  }
 
   List<Map<String, dynamic>> get _visible {
+    final categoryFilter = _effectiveCategoryFilter;
     return _cloudTxns.where((t) {
       if (_filter != 'all' && _typeOf(t) != _filter) return false;
-      if (_categoryFilter != 'all' && _categoryOf(t) != _categoryFilter) {
-        return false;
+      if (categoryFilter != null) {
+        final key = _categoryKeyOf(t);
+        final matches = categoryFilter.id.isNotEmpty
+            ? key.id == categoryFilter.id
+            : key.name == categoryFilter.name && key.type == categoryFilter.type;
+        if (!matches) return false;
       }
       return true;
     }).toList();
@@ -280,7 +357,16 @@ class _DashboardPageState extends State<DashboardPage> {
                                 f == 'all' ? 'All' : TxnTypeStyle.of(f).label,
                               ),
                               selected: _filter == f,
-                              onSelected: (_) => setState(() => _filter = f),
+                              onSelected: (_) => setState(() {
+                                _filter = f;
+                                // A category from the previous type would leave
+                                // the list empty; drop it instead.
+                                if (f != 'all' &&
+                                    _categoryFilter != null &&
+                                    _categoryFilter!.type != f) {
+                                  _categoryFilter = null;
+                                }
+                              }),
                             ),
                           ),
                         ],
@@ -295,24 +381,22 @@ class _DashboardPageState extends State<DashboardPage> {
                       isDense: true,
                     ),
                     child: DropdownButtonHideUnderline(
-                      child: DropdownButton<String>(
+                      child: DropdownButton<_CategoryKey?>(
                         isExpanded: true,
-                        value: _categories.contains(_categoryFilter)
-                            ? _categoryFilter
-                            : 'all',
+                        value: _effectiveCategoryFilter,
                         items: [
-                          const DropdownMenuItem(
-                            value: 'all',
+                          const DropdownMenuItem<_CategoryKey?>(
+                            value: null,
                             child: Text('All categories'),
                           ),
                           for (final category in _categories)
-                            DropdownMenuItem(
+                            DropdownMenuItem<_CategoryKey?>(
                               value: category,
-                              child: Text(category),
+                              child: Text(_categoryLabel(category)),
                             ),
                         ],
                         onChanged: (value) =>
-                            setState(() => _categoryFilter = value ?? 'all'),
+                            setState(() => _categoryFilter = value),
                       ),
                     ),
                   ),
@@ -322,7 +406,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       hasFilter:
                           _dateRange != null ||
                           _filter != 'all' ||
-                          _categoryFilter != 'all',
+                          _categoryFilter != null,
                       isOffline: isOffline,
                     )
                   else ...[

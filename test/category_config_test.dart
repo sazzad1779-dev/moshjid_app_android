@@ -11,6 +11,15 @@ void main() {
       expect(AppConfig.seedCategories['expense'], contains('Imam Hadiya'));
     });
 
+    test('has purpose categories under both income and expense', () {
+      // Donations collected for the electricity bill or maintenance are income;
+      // paying those bills is expense. Both sides of each purpose must exist.
+      for (final name in ['Electricity Bill', 'Maintenance']) {
+        expect(AppConfig.seedCategories['income'], contains(name));
+        expect(AppConfig.seedCategories['expense'], contains(name));
+      }
+    });
+
     test('mirrors the canonical list in tools/sync_categories.py', () {
       // The category *names* the ledger actually contains. If a row is renamed
       // in Supabase, this test is the reminder to update both lists.
