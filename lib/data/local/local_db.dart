@@ -403,24 +403,32 @@ class LocalDb {
     return (await findProfileByMatchKey(incoming.matchKey)) ?? incoming;
   }
 
-  /// Drops cached donors the server no longer has.
+  /// Hides cached donors the server no longer considers live.
   ///
   /// Only rows that came *from* the server and carry a remote id are eligible.
   /// A donor still pending on this device has no remote id and is never touched,
   /// so pulling while offline work is queued cannot lose it.
+  ///
+  /// This is a soft delete, not a row removal: `transactions_local.member_id`
+  /// still points at the row, so the payment history keeps resolving to the same
+  /// member even after the server drops them. Already-deleted rows are skipped,
+  /// which is what preserves a delete this device made and has not uploaded yet.
   Future<int> pruneCloudProfiles(Set<String> liveRemoteIds) async {
     final d = await db;
-    if (liveRemoteIds.isEmpty) {
-      // The server reported no donors at all. Everything with a remote id is
-      // gone; pending local donors are untouched. `NOT IN ()` would be a
-      // syntax error, hence the separate branch.
-      return d.delete(_profileTable, where: 'remote_id IS NOT NULL');
+    final where = StringBuffer('remote_id IS NOT NULL AND is_deleted = 0');
+    final args = <Object?>[];
+    if (liveRemoteIds.isNotEmpty) {
+      // `NOT IN ()` would be a syntax error; an empty live set simply means
+      // every cloud donor is gone, which the base predicate already covers.
+      final placeholders = List.filled(liveRemoteIds.length, '?').join(',');
+      where.write(' AND remote_id NOT IN ($placeholders)');
+      args.addAll(liveRemoteIds);
     }
-    final placeholders = List.filled(liveRemoteIds.length, '?').join(',');
-    return d.delete(
+    return d.update(
       _profileTable,
-      where: 'remote_id IS NOT NULL AND remote_id NOT IN ($placeholders)',
-      whereArgs: liveRemoteIds.toList(),
+      {'is_deleted': 1, 'synced_at': DateTime.now().toIso8601String()},
+      where: where.toString(),
+      whereArgs: args.isEmpty ? null : args,
     );
   }
 

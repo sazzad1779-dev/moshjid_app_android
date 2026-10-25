@@ -120,7 +120,18 @@ class _MembersPageState extends State<MembersPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Members'),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Members'),
+            if (!_loading)
+              Text(
+                '${_all.length} member${_all.length == 1 ? '' : 's'}',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+          ],
+        ),
         actions: [
           if (pending > 0)
             Padding(
@@ -321,6 +332,7 @@ class _MemberDetailSheetState extends State<_MemberDetailSheet> {
     await widget.local.softDeleteProfile(_member.id);
     if (!mounted) return;
     await _load();
+    if (!mounted) return;
     Navigator.pop(context);
     await widget.onDataChanged();
   }

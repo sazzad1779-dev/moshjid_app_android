@@ -179,12 +179,19 @@ class SyncService {
 
   /// Downloads the donor roster so the picker works offline.
   ///
+  /// Only live donors are taken from the server. A soft-deleted row is ignored
+  /// rather than cached as active: the roster is the thing the picker and the
+  /// members tab read, and a tombstone must never reappear there. Rows this
+  /// device deleted itself are preserved by [LocalDb.pruneCloudProfiles].
+  ///
   /// Returns the number of donors now cached, or null on failure.
   Future<int?> pullProfiles() async {
     final client = _client;
     if (client == null) return null;
     try {
-      final rows = await _selectAllProfiles(client);
+      final rows = (await _selectAllProfiles(client))
+          .where((row) => row['is_deleted'] != true)
+          .toList();
 
       final live = <String>{};
       for (final row in rows) {
@@ -194,7 +201,7 @@ class SyncService {
       }
       // Runs even when `rows` is empty. An empty roster is a real answer: every
       // donor that carries a server uuid has been removed there, and keeping
-      // them cached would leave the picker showing people the server no longer
+      // them visible would leave the picker showing people the server no longer
       // has. Pending local donors have no remote id and are never touched.
       await local.pruneCloudProfiles(live);
       return rows.length;
@@ -218,13 +225,14 @@ class SyncService {
     }
   }
 
-  /// Reads the whole roster, preferring the lean column list.
+  /// Reads the live roster, preferring the lean column list.
   ///
   /// Falls back to `*` when `phone`, `is_monthly` or `is_deleted` do not exist
   /// yet, which is the case until `tools/donor_dedupe.sql` and
   /// `tools/member_lifecycle.sql` have been run. Without this a missing
   /// migration would take the entire donor picker down rather than just the
-  /// phone numbers.
+  /// phone numbers. On that fallback path the caller's client-side
+  /// `is_deleted` check is the only filter, since the column may be absent.
   Future<List<Map<String, dynamic>>> _selectAllProfiles(
     SupabaseClient client,
   ) async {
@@ -232,11 +240,21 @@ class SyncService {
         'id,full_name,phone,role,status,is_monthly,is_deleted,client_created_at,created_at';
     try {
       return await _paged(
-        (from, to) => client.from('profiles').select(lean).range(from, to),
+        (from, to) => client
+            .from('profiles')
+            .select(lean)
+            // `IS NOT TRUE` also matches NULL, which a column added to an
+            // existing table can hold. `= false` would silently skip every
+            // such row and the pull would look like an empty roster.
+            .not('is_deleted', 'is', true)
+            .range(from, to),
       );
     } on PostgrestException catch (e) {
-      // 42703 = undefined_column
-      if (e.code != '42703' && !e.message.contains('column')) rethrow;
+      // 42703 = undefined_column; PGRST204 is PostgREST's own "column not in
+      // schema cache" before the statement reaches Postgres.
+      if (e.code != '42703' && e.code != 'PGRST204' && !e.message.contains('column')) {
+        rethrow;
+      }
       return await _paged(
         (from, to) => client.from('profiles').select().range(from, to),
       );
@@ -324,6 +342,22 @@ class SyncService {
     await client.from('profiles').upsert(payload, onConflict: 'id');
   }
 
+  /// Soft-deletes one donor on the server.
+  ///
+  /// Kept separate from [_upsertProfile] so a delete can never be reduced to a
+  /// successful no-op: there is no optional-column fallback here, and only the
+  /// flag and timestamp are written, so the protected-column trigger has nothing
+  /// to object to.
+  Future<void> _markProfileDeleted(
+    SupabaseClient client,
+    String remoteId,
+  ) async {
+    await client.from('profiles').update({
+      'is_deleted': true,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    }).eq('id', remoteId);
+  }
+
   /// Pushes donors this device created offline.
   ///
   /// Returns `(created, merged)`:
@@ -366,7 +400,15 @@ class SyncService {
         // UNIQUE index raises and the catch block folds them together, which is
         // the same outcome as two devices racing on a new donor.
         if (p.remoteId != null) {
-          await _upsertProfile(client, p);
+          if (p.isDeleted) {
+            // A delete only needs the flag. Sending the whole row would re-run
+            // the protected-column checks for no reason, and would let the
+            // optional-column fallback silently drop `is_deleted` -- losing the
+            // delete while the donor stays live on the server.
+            await _markProfileDeleted(client, p.remoteId!);
+          } else {
+            await _upsertProfile(client, p);
+          }
           await local.markProfileSynced(id: p.id, remoteId: p.remoteId!);
           if (p.isDeleted) {
             merged++;
@@ -380,6 +422,10 @@ class SyncService {
         // import has already registered the donor.
         final existing = await _findRemoteByMatchKey(client, matchKey);
         if (existing != null) {
+          // The row exists on the server under someone else's uuid, so there is
+          // no row of ours to update. A pending delete still has to reach it,
+          // or this device would hide the member while the server kept them.
+          if (p.isDeleted) await _markProfileDeleted(client, existing);
           await local.markProfileSynced(id: p.id, remoteId: existing);
           merged++;
           continue;
@@ -397,10 +443,13 @@ class SyncService {
             await _findRemoteByMatchKey(client, matchKey) ?? p.pushId;
         await local.markProfileSynced(id: p.id, remoteId: canonical);
         if (canonical == p.pushId) {
+          // The insert carried `is_deleted`, so a delete needs nothing more.
           created++;
         } else {
           // The server already had this donor under another id, so ours was
-          // folded away. Same outcome as the early-exit branch above.
+          // folded away. Same outcome as the early-exit branch above -- and a
+          // pending delete has to be applied to the winner explicitly.
+          if (p.isDeleted) await _markProfileDeleted(client, canonical);
           merged++;
         }
       } catch (e) {
@@ -410,6 +459,7 @@ class SyncService {
         if (_isDuplicateKey(e)) {
           final winner = await _findRemoteByMatchKey(client, p.matchKey);
           if (winner != null) {
+            if (p.isDeleted) await _markProfileDeleted(client, winner);
             await local.markProfileSynced(id: p.id, remoteId: winner);
             merged++;
           }
@@ -515,7 +565,7 @@ class SyncService {
     }
     if (!await isOnline) return null;
 
-    return _paged((from, to) async {
+    final rows = await _paged((from, to) async {
       dynamic query = client
           .from('transactions')
           .select(
@@ -533,9 +583,12 @@ class SyncService {
           .order('created_at', ascending: false)
           .order('id', ascending: true)
           .range(from, to);
-      final rows = await query;
-      return (rows as List).cast<Map<String, dynamic>>();
+      final page = await query;
+      return (page as List).cast<Map<String, dynamic>>();
     });
+    // The server filters too; this keeps the contract explicit for a partial
+    // migration or a proxy that ignores the query parameter.
+    return rows.where((row) => row['is_deleted'] != true).toList();
   }
 
   /// Pushes pending transactions. Donors must already be pushed.
@@ -594,6 +647,10 @@ class SyncService {
   /// Errors that will not fix themselves on a retry, so the queue should wait
   /// rather than spin.
   static bool _isFatal(Object e) {
+    // A column the server does not have is a migration problem. Retrying the
+    // same statement cannot succeed, so report it instead of leaving the row
+    // pending forever with no explanation.
+    if (e is PostgrestException && _isMissingColumn(e)) return true;
     final s = e.toString();
     return s.contains('row-level security') ||
         s.contains('JWT') ||

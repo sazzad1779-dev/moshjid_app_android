@@ -57,6 +57,31 @@ void main() {
     );
   }
 
+  /// A client that records every request, so a push body can be inspected.
+  SupabaseClient recordingClient(
+    List<Map<String, dynamic>> profiles,
+    List<http.Request> log,
+  ) {
+    const headers = {'content-type': 'application/json; charset=utf-8'};
+    return SupabaseClient(
+      'https://example.supabase.co',
+      'test-anon-key',
+      httpClient: MockClient((request) async {
+        log.add(request);
+        final body = request.url.path == '/rest/v1/profiles' &&
+                request.method == 'GET'
+            ? profiles
+            : const <Object>[];
+        return http.Response(
+          jsonEncode(body),
+          200,
+          request: request,
+          headers: headers,
+        );
+      }),
+    );
+  }
+
   group('pullProfiles', () {
     test('a server rename lands on the row matched by remote id', () async {
       final client = fakeClient([
@@ -169,6 +194,69 @@ void main() {
         }
       },
     );
+  });
+
+  group('deletes', () {
+    test('a deleted server member is hidden but kept for history', () async {
+      final client = fakeClient([serverRow(isDeleted: true)]);
+      try {
+        await LocalDb.withTempDb((db) async {
+          await db.upsertCloudProfile(serverRow());
+          expect(await db.allProfiles(), hasLength(1));
+
+          expect(await _TestSync(db, client: client).pullProfiles(), 0);
+
+          expect(await db.allProfiles(), isEmpty);
+          expect((await db.findProfileByRemoteId('server-1'))!.isDeleted, isTrue);
+        });
+      } finally {
+        await client.dispose();
+      }
+    });
+
+    test('a local delete is sent for a member the server knows by identity',
+        () async {
+      final requests = <http.Request>[];
+      final client = recordingClient([serverRow()], requests);
+      try {
+        await LocalDb.withTempDb((db) async {
+          final member = await db.ensureProfile(fullName: 'Roxi');
+          await db.softDeleteProfile(member.id);
+
+          await _TestSync(db, client: client).pushProfiles();
+
+          final after = (await db.findProfileById(member.id))!;
+          expect(after.isDeleted, isTrue);
+          expect(after.remoteId, 'server-1');
+          final patch = requests.singleWhere((r) => r.method == 'PATCH');
+          expect(patch.url.queryParameters['id'], 'eq.server-1');
+          expect(jsonDecode(patch.body)['is_deleted'], isTrue);
+        });
+      } finally {
+        await client.dispose();
+      }
+    });
+
+    test('a local delete of a synced member sends the flag', () async {
+      final requests = <http.Request>[];
+      final client = recordingClient([], requests);
+      try {
+        await LocalDb.withTempDb((db) async {
+          final member = await db.ensureProfile(fullName: 'Roxi');
+          await db.markProfileSynced(id: member.id, remoteId: 'server-1');
+          await db.softDeleteProfile(member.id);
+
+          await _TestSync(db, client: client).pushProfiles();
+
+          final patch = requests.singleWhere((r) => r.method == 'PATCH');
+          expect(patch.url.queryParameters['id'], 'eq.server-1');
+          expect(jsonDecode(patch.body)['is_deleted'], isTrue);
+          expect((await db.pendingProfiles()), isEmpty);
+        });
+      } finally {
+        await client.dispose();
+      }
+    });
   });
 
   group('sync', () {

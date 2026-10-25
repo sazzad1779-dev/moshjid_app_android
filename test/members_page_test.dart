@@ -43,6 +43,17 @@ void main() {
     });
   });
 
+  testWidgets('the app bar shows how many members there are', (tester) async {
+    await LocalDb.withTempDb((db) async {
+      await db.ensureProfile(fullName: 'Roxi Ahmed');
+      await db.ensureProfile(fullName: 'Taijul Islam');
+
+      await openMembers(tester, db);
+
+      expect(find.text('2 members'), findsOneWidget);
+    });
+  });
+
   testWidgets('search narrows the roster', (tester) async {
     await LocalDb.withTempDb((db) async {
       await db.ensureProfile(fullName: 'Roxi Ahmed');
