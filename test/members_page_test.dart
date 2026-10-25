@@ -33,6 +33,13 @@ void main() {
       await db.ensureProfile(fullName: 'Roxi Ahmed');
       await db.ensureProfile(fullName: 'Shamsul Bapary', phone: '01712345678');
       await db.ensureProfile(fullName: 'Taijul Islam');
+      await db.upsertCloudProfile({
+        'id': 'collector-remote-id',
+        'full_name': 'Kamal',
+        'role': 'collector',
+        'status': 'active',
+        'client_created_at': DateTime.now().toUtc().toIso8601String(),
+      });
 
       await openMembers(tester, db);
 
@@ -40,6 +47,7 @@ void main() {
       expect(find.text('Shamsul Bapary'), findsOneWidget);
       expect(find.text('01712345678'), findsOneWidget);
       expect(find.text('Taijul Islam'), findsOneWidget);
+      expect(find.text('Kamal'), findsOneWidget);
     });
   });
 

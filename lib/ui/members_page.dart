@@ -67,7 +67,10 @@ class _MembersPageState extends State<MembersPage> {
     // The roster is the whole tab, so read it unfiltered and filter in memory
     // against the same normalised keys the database uses, rather than issuing a
     // new query per keystroke.
-    final members = await _local.allProfiles();
+    // The roster tab shows every profile the mosque has, including collectors
+    // and other staff. The donor picker still defaults to members only, so a
+    // collector does not show up as somebody who owes a monthly donation.
+    final members = await _local.allProfiles(includeStaff: true);
     final totals = <String, double>{};
     for (final m in members) {
       totals[m.id] = await _local.memberTotal(m.id);
