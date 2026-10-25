@@ -63,7 +63,13 @@ class SyncService {
   /// [AppConfig] and [Supabase.instance] as normal.
   final SupabaseClient? _injected;
 
-  SyncService(this.local, {SupabaseClient? client}) : _injected = client;
+  /// Resolves the signed-in user's `profiles.id`. Injectable for tests; the
+  /// real service talks to [Supabase.instance].
+  final AuthService _auth;
+
+  SyncService(this.local, {SupabaseClient? client, AuthService? auth})
+      : _injected = client,
+        _auth = auth ?? AuthService();
 
   /// PostgREST caps a response; pull donors in pages rather than assuming the
   /// whole roster fits.
@@ -95,7 +101,7 @@ class SyncService {
       return const SyncResult(error: 'Supabase not configured (offline mode)');
     }
     if (client.auth.currentUser == null) {
-      final ok = await AuthService().ensureSignedIn();
+      final ok = await _auth.ensureSignedIn();
       if (!ok) {
         return const SyncResult(
           error: 'Sync unavailable — service sign-in failed (offline or bad SERVICE_EMAIL/PASSWORD)',
@@ -105,6 +111,12 @@ class SyncService {
     if (!await isOnline) {
       return const SyncResult(error: 'Offline — kept locally');
     }
+
+    // The entered_by cache is deliberately long-lived for offline writes, but
+    // that means a re-linked or replaced profile would only be noticed after a
+    // fresh sign-in. Re-resolve it once per sync so the next transaction is
+    // written against the current server row.
+    await _refreshCurrentUser();
 
     final cats = await refreshCategories();
     var profiles = await pullProfiles();
@@ -173,7 +185,6 @@ class SyncService {
     if (client == null) return null;
     try {
       final rows = await _selectAllProfiles(client);
-      if (rows.isEmpty) return null;
 
       final live = <String>{};
       for (final row in rows) {
@@ -181,10 +192,29 @@ class SyncService {
         if (remoteId is String && remoteId.isNotEmpty) live.add(remoteId);
         await local.upsertCloudProfile(row);
       }
+      // Runs even when `rows` is empty. An empty roster is a real answer: every
+      // donor that carries a server uuid has been removed there, and keeping
+      // them cached would leave the picker showing people the server no longer
+      // has. Pending local donors have no remote id and are never touched.
       await local.pruneCloudProfiles(live);
       return rows.length;
     } catch (_) {
       return null;
+    }
+  }
+
+  /// Re-resolves the signed-in user's `profiles.id` for `entered_by`.
+  ///
+  /// [AuthService.resolveEnteredById] caches the id because transactions are
+  /// written while offline, but the cache outlives server-side changes to the
+  /// link. Refreshing here keeps new transactions pointed at the row that
+  /// exists now. A failure is ignored on purpose: the cached id or the
+  /// configured fallback is still usable, and sync must never throw.
+  Future<void> _refreshCurrentUser() async {
+    try {
+      await _auth.resolveEnteredById(forceRefresh: true);
+    } catch (_) {
+      // Keep the cached/fallback id; sync continues either way.
     }
   }
 

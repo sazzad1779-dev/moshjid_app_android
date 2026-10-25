@@ -286,6 +286,14 @@ class LocalDb {
     return Profile.fromLocalMap(rows.first);
   }
 
+  Future<Profile?> findProfileByRemoteId(String remoteId) async {
+    final d = await db;
+    final rows = await d.query(_profileTable,
+        where: 'remote_id = ?', whereArgs: [remoteId], limit: 1);
+    if (rows.isEmpty) return null;
+    return Profile.fromLocalMap(rows.first);
+  }
+
   /// Returns the donor for this identity, creating one if this device has never
   /// seen them.
   ///
@@ -338,24 +346,34 @@ class LocalDb {
   /// Inserts or refreshes a donor that came down from the server.
   ///
   /// Takes the raw Supabase row so the local id is always minted here and a
-  /// caller can never supply the wrong one. [row] is matched by identity, not
-  /// by id: the same donor can already exist here under a local id from when
-  /// they were typed in offline. When that happens the local row is kept as the
-  /// identity -- every transaction points at it and nothing needs repointing --
+  /// caller can never supply the wrong one. The server uuid is preferred when
+  /// matching because it is the only handle that survives a rename: identity
+  /// ([Profile.matchKey]) changes when the name or phone does, so matching on
+  /// it first would miss the local row and the insert would be refused by
+  /// `ux_profiles_remote`, leaving the stale details on this device forever.
+  ///
+  /// Falling back to identity still covers the donor who was typed in offline
+  /// and has no uuid yet. When that happens the local row is kept as the
+  /// handle -- every transaction points at it and nothing needs repointing --
   /// and it simply adopts the server's uuid and canonical spelling.
   Future<Profile> upsertCloudProfile(Map<String, dynamic> row) async {
     final d = await db;
     final incoming = Profile.fromSupabase(row, localId: const Uuid().v4());
-    final matchKey = incoming.matchKey;
+    final remoteId = incoming.remoteId;
 
-    final byMatch = await findProfileByMatchKey(matchKey);
-    if (byMatch != null) {
-      // A delete made on this device but not yet uploaded outranks whatever the
+    final byRemote =
+        remoteId == null ? null : await findProfileByRemoteId(remoteId);
+    final existing = byRemote ?? await findProfileByMatchKey(incoming.matchKey);
+
+    if (existing != null) {
+      // An edit or delete made here but not yet uploaded outranks whatever the
       // server still says. pullProfiles runs before pushProfiles, so taking
-      // `incoming` here would resurrect the member; stamping `syncedAt` would go
-      // further and mark the delete as delivered, losing it for good.
-      final keepDelete = byMatch.isDeleted && byMatch.syncedAt == null;
-      final merged = byMatch.copyWith(
+      // `incoming` here would discard the queued change; stamping `syncedAt`
+      // would drop it for good. A never-pushed donor has no uuid, so it is not
+      // protected -- there the server's canonical version wins.
+      if (existing.remoteId != null && existing.isPending) return existing;
+
+      final merged = existing.copyWith(
         remoteId: incoming.remoteId,
         fullName: incoming.fullName,
         phone: incoming.phone,
@@ -366,19 +384,15 @@ class LocalDb {
         source: ProfileSource.cloud,
         // The rule is "keep the first": whichever record of this donor dates
         // from further back wins, whoever we learned it from.
-        clientCreatedAt: incoming.clientCreatedAt.isBefore(byMatch.clientCreatedAt)
-            ? incoming.clientCreatedAt
-            : byMatch.clientCreatedAt,
-        // A delete this device has made but not yet uploaded outranks whatever
-        // the server still says. pullProfiles runs before pushProfiles, so
-        // taking `incoming` here would resurrect the member and mark the row
-        // synced -- losing the delete entirely.
-        isDeleted: keepDelete ? true : incoming.isDeleted,
-        syncedAt: keepDelete ? null : DateTime.now(),
-        clearSyncedAt: keepDelete,
+        clientCreatedAt:
+            incoming.clientCreatedAt.isBefore(existing.clientCreatedAt)
+                ? incoming.clientCreatedAt
+                : existing.clientCreatedAt,
+        isDeleted: incoming.isDeleted,
+        syncedAt: DateTime.now(),
       );
       await d.update(_profileTable, merged.toLocalMap(),
-          where: 'id = ?', whereArgs: [byMatch.id]);
+          where: 'id = ?', whereArgs: [existing.id]);
       return merged;
     }
 
@@ -386,7 +400,7 @@ class LocalDb {
     // the freshly minted local id so transactions never hold a server uuid.
     await d.insert(_profileTable, incoming.toLocalMap(),
         conflictAlgorithm: ConflictAlgorithm.ignore);
-    return (await findProfileByMatchKey(matchKey)) ?? incoming;
+    return (await findProfileByMatchKey(incoming.matchKey)) ?? incoming;
   }
 
   /// Drops cached donors the server no longer has.

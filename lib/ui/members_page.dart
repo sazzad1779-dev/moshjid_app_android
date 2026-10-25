@@ -320,6 +320,7 @@ class _MemberDetailSheetState extends State<_MemberDetailSheet> {
     if (ok != true) return;
     await widget.local.softDeleteProfile(_member.id);
     if (!mounted) return;
+    await _load();
     Navigator.pop(context);
     await widget.onDataChanged();
   }
